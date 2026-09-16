@@ -319,10 +319,29 @@ void RSLogClass::_persistAndLoop(const char *text)
     rs_tx_set_burst(&ftx, 150000u / chip_us, 50000u / chip_us);
     RSLog._writeAll(0);
     pinMode(RSLog._cfg.fault_pin, OUTPUT);
+
+    /* Exact chip timing from the DWT cycle counter. The work per chip (encoder +
+     * GPIO write) must not add to the period: a chip that grows from 30 to 80 us
+     * makes a packet taller than the LED blob in the camera frame and nothing
+     * decodes. Falls back to the calibrated delay if the counter does not run. */
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    uint32_t cyc = (SystemCoreClock / 1000000u) * chip_us;
+    uint32_t probe = DWT->CYCCNT;
+    R_BSP_SoftwareDelay(5, BSP_DELAY_UNITS_MICROSECONDS);
+    bool have_dwt = (DWT->CYCCNT != probe) && cyc > 0;
+    uint32_t next = DWT->CYCCNT + cyc;
+    uint8_t chip = rs_tx_next_chip(&ftx);
     for (;;) {
-        uint8_t chip = rs_tx_next_chip(&ftx);
+        if (have_dwt) {
+            while ((int32_t)(DWT->CYCCNT - next) < 0) { }
+            next += cyc;
+        } else {
+            R_BSP_SoftwareDelay(chip_us, BSP_DELAY_UNITS_MICROSECONDS);
+        }
         digitalWrite(RSLog._cfg.fault_pin, (chip ^ RSLog._cfg.fault_pin_active_low) ? HIGH : LOW);
-        R_BSP_SoftwareDelay(chip_us, BSP_DELAY_UNITS_MICROSECONDS);
+        chip = rs_tx_next_chip(&ftx);           /* prepared while the chip is being shown */
     }
 }
 
