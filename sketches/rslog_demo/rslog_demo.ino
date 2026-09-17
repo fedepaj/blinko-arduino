@@ -111,7 +111,7 @@ void loop()
     if (g_wdt_on) WDT.refresh();
     if (millis() - g_last_status > 5000) {
         g_last_status = millis();
-        RSLog.status("up=%lus rst=%s n=%lu", (unsigned long)(millis() / 1000), RSLog.resetCause(), (unsigned long)g_counter++);
+        RSLog.status("up=%lus rst=%s n=%lu id=%04x", (unsigned long)(millis() / 1000), RSLog.resetCause(), (unsigned long)g_counter++, RSLog.boardId());
         RSLog.checkpoint("loop");
     }
 }
