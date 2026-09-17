@@ -155,7 +155,7 @@ bool RSLogClass::begin(const RSLogConfig &cfg)
 
     if (_fault_text[0]) _setSlot(RS_SLOT_FAULT, RS_LVL_FAULT, _fault_text, strlen(_fault_text));
 
-    if (_cfg.announce_boot) status("boot#%lu rst=%s", (unsigned long)fr.boot_count, _reset_cause);
+    if (_cfg.announce_boot) status("boot#%lu rst=%s id=%04x", (unsigned long)fr.boot_count, _reset_cause, boardId());
 
     rs_tx_set_burst(&_tx, (uint32_t)_cfg.burst_on_ms * 1000u / _cfg.chip_us, (uint32_t)_cfg.burst_off_ms * 1000u / _cfg.chip_us);
     rs_tx_set_channels(&_tx, _cfg.channels, (uint32_t)_cfg.pilot_ms * 1000u / _cfg.chip_us);
@@ -344,6 +344,14 @@ void RSLogClass::_persistAndLoop(const char *text)
         digitalWrite(RSLog._cfg.fault_pin, (chip ^ RSLog._cfg.fault_pin_active_low) ? HIGH : LOW);
         chip = rs_tx_next_chip(&ftx);           /* prepared while the chip is being shown */
     }
+}
+
+uint16_t RSLogClass::boardId() const
+{
+    const bsp_unique_id_t *u = R_BSP_UniqueIdGet();      /* 128-bit factory id */
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < 16; i++) { h ^= u->unique_id_bytes[i]; h *= 16777619u; }   /* FNV-1a */
+    return (uint16_t)(h ^ (h >> 16));
 }
 
 /* ---------------------------------------------------- tuning helpers */

@@ -69,6 +69,10 @@ public:
     const char *faultText() const { return _fault_text; }
     void clearFault();
 
+    /* 16-bit id derived from the MCU's unique id (announced as "id=xxxx" in the boot STATUS,
+     * shown by the app next to the light that sends it). */
+    uint16_t boardId() const;
+
     /* Name the current phase; reported if a watchdog/hard fault reset follows. */
     void checkpoint(const char *name);
 
