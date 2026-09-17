@@ -1,13 +1,13 @@
 #!/bin/sh
 # Build (and optionally upload) a sketch for the Arduino Nano R4.
-#   firmware/build.sh [sketch=rslog_demo] [upload]
+#   firmware/build.sh [sketch=blinko_demo] [upload]
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
-SKETCH=${1:-rslog_demo}
+SKETCH=${1:-blinko_demo}
 FQBN=${FQBN:-arduino:renesas_uno:nanor4}
 # keep the library's copy of the shared core (git submodule ./core) in sync
 if [ -f "$HERE/core/rs_proto.h" ]; then
-    cp "$HERE"/core/rs_proto.h "$HERE"/core/rs_tx.h "$HERE"/core/rs_tx.c "$HERE"/core/rs_pack.h "$HERE"/core/rs_pack.c "$HERE"/libraries/RSLog/src/core/
+    cp "$HERE"/core/rs_proto.h "$HERE"/core/rs_tx.h "$HERE"/core/rs_tx.c "$HERE"/core/rs_pack.h "$HERE"/core/rs_pack.c "$HERE"/libraries/Blinko/src/core/
 fi
 mkdir -p "$HERE/build"
 arduino-cli compile --fqbn "$FQBN" --libraries "$HERE/libraries" --output-dir "$HERE/build/$SKETCH" \

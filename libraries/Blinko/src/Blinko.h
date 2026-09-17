@@ -1,29 +1,29 @@
 /*
- * RSLog — optical logger for rolling-shutter cameras (Arduino Nano R4 / UNO R4).
+ * Blinko — optical logger for rolling-shutter cameras (Arduino Nano R4 / UNO R4).
  *
- *   #include <RSLog.h>
- *   void setup() { RSLog.begin(); RSLog.info("boot ok"); }
+ *   #include <Blinko.h>
+ *   void setup() { Blinko.begin(); Blinko.info("boot ok"); }
  *
  * Messages are transmitted continuously by blinking the on-board LEDs from a
  * hardware timer interrupt. A phone camera pointed at the board decodes them.
  * See docs/PROTOCOL.md for the wire format.
  */
-#ifndef RSLOG_H
-#define RSLOG_H
+#ifndef BLINKO_H
+#define BLINKO_H
 
 #include <Arduino.h>
 #include "core/rs_proto.h"
 #include "core/rs_tx.h"
 
-#define RSLOG_PINS_PER_CH 2
-#define RSLOG_NO_PIN 0xFF
-#define RSLOG_CHECKPOINT_LEN 16
+#define BLINKO_PINS_PER_CH 2
+#define BLINKO_NO_PIN 0xFF
+#define BLINKO_CHECKPOINT_LEN 16
 
-struct RSLogConfig {
+struct BlinkoConfig {
     uint32_t chip_us = 30;                       /* half-bit duration; iPhone 14: 5 us/row -> ~6 rows/chip */
     /* LEDs per channel (RGB streams). Channel 0 = red (+ LED_BUILTIN mirrors it), 1 = green, 2 = blue. */
-    uint8_t  ch_pins[RS_MAX_CHANNELS][RSLOG_PINS_PER_CH] = { { LEDR, LED_BUILTIN }, { LEDG, RSLOG_NO_PIN }, { LEDB, RSLOG_NO_PIN } };
-    uint8_t  ch_active_low[RS_MAX_CHANNELS][RSLOG_PINS_PER_CH] = { { 1, 0 }, { 1, 0 }, { 1, 0 } };
+    uint8_t  ch_pins[RS_MAX_CHANNELS][BLINKO_PINS_PER_CH] = { { LEDR, LED_BUILTIN }, { LEDG, BLINKO_NO_PIN }, { LEDB, BLINKO_NO_PIN } };
+    uint8_t  ch_active_low[RS_MAX_CHANNELS][BLINKO_PINS_PER_CH] = { { 1, 0 }, { 1, 0 }, { 1, 0 } };
     uint8_t  channels = 3;                       /* 3 = independent RGB streams (3x throughput), 1 = all LEDs same stream */
     uint16_t pilot_ms = 30;                      /* RGB colour-calibration pilots interval; 36 chips every 30 ms = 3.6 % overhead, ~4x more pilots per second than 100 ms */
     uint8_t  fault_weight = 3;                   /* death loop: FAULT visits per other visit (1..4); 3 = fault reason in ~1-2 s */
@@ -37,24 +37,24 @@ struct RSLogConfig {
 
 /* Record that survives resets (placed in .noinit RAM). */
 struct rs_fault_record_t {
-    uint32_t magic;                              /* RSLOG_FAULT_MAGIC when a fault record is pending */
-    uint32_t boot_magic;                         /* RSLOG_BOOT_MAGIC once begin() ran (detects warm resets) */
+    uint32_t magic;                              /* BLINKO_FAULT_MAGIC when a fault record is pending */
+    uint32_t boot_magic;                         /* BLINKO_BOOT_MAGIC once begin() ran (detects warm resets) */
     uint32_t boot_count;
     uint32_t loading;                            /* boot-loop guard while reading flash */
     uint32_t fw_id;                              /* build id of the firmware that wrote the record */
-    char     checkpoint[RSLOG_CHECKPOINT_LEN];
+    char     checkpoint[BLINKO_CHECKPOINT_LEN];
     char     text[RS_MSG_MAX_LEN + 1];
 };
 
-class RSLogClass : public Print {
+class BlinkoClass : public Print {
 public:
-    /* Print interface: RSLog.print()/println()/printf() work like Serial; every line ('\n')
+    /* Print interface: Blinko.print()/println()/printf() work like Serial; every line ('\n')
      * becomes a message at printLevel (INFO by default). Useful to redirect existing prints. */
     size_t write(uint8_t c) override;
     size_t write(const uint8_t *buf, size_t n) override;
     void printf(const char *fmt, ...);
     void setPrintLevel(uint8_t level) { _print_level = level; }
-    bool begin(const RSLogConfig &cfg = RSLogConfig());
+    bool begin(const BlinkoConfig &cfg = BlinkoConfig());
     void end();
 
     /* Logging (slots 0..5, newest first in the carousel). Text > 31 bytes is split. */
@@ -109,7 +109,7 @@ private:
     void _readResetCause();
     bool _startTimer(float hz);
 
-    RSLogConfig _cfg;
+    BlinkoConfig _cfg;
     rs_tx_t _tx;
     char _fault_text[RS_MSG_MAX_LEN + 1] = { 0 };
     char _print_buf[RS_MSG_MAX_LEN * 2 + 1];
@@ -121,6 +121,6 @@ private:
     uint8_t _strobe_level = 0;
 };
 
-extern RSLogClass RSLog;
+extern BlinkoClass Blinko;
 
 #endif

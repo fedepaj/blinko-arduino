@@ -1,10 +1,10 @@
 /*
  * Hard fault capture for Cortex-M4 (RA4M1). Overrides the weak
  * HardFault_Handler from the FSP startup code. Captures the stacked PC/LR
- * and the fault status registers, then hands over to RSLog which blinks the
+ * and the fault status registers, then hands over to Blinko which blinks the
  * fault record forever (no interrupts needed).
  */
-#include "RSLog.h"
+#include "Blinko.h"
 
 static void hex(char *dst, uint32_t v, int digits)
 {
@@ -34,9 +34,9 @@ extern "C" __attribute__((used)) void rs_hardfault_c(uint32_t *frame)
                 b[n++] = ' '; hex(b + n, w, 5); n += 5; b[n] = 0; nb++;
             }
         }
-        if (nb) RSLog.log(RS_LVL_ERROR, "%s", b);
+        if (nb) Blinko.log(RS_LVL_ERROR, "%s", b);
     }
-    RSLogClass::_persistAndLoop(t);
+    BlinkoClass::_persistAndLoop(t);
 }
 
 extern "C" __attribute__((naked)) void HardFault_Handler(void)
