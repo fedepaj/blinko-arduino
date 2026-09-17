@@ -1,5 +1,5 @@
 /*
- * rs_tx.h — RSLog transmitter v2: message slots, priority carousel, fountain
+ * rs_tx.h — Blinko transmitter v2: message slots, priority carousel, fountain
  * coding, visible-blink bursts, chip source. Driven from a timer ISR
  * (rs_tx_next_chip) or a bare-metal loop (fault handler). No allocation.
  */

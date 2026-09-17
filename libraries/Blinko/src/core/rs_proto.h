@@ -1,5 +1,5 @@
 /*
- * rs_proto.h — RSLog optical protocol v2: shared definitions (encoder + decoder).
+ * rs_proto.h — Blinko optical protocol v2: shared definitions (encoder + decoder).
  * Freestanding C99, no allocation, no libc except stdint/stddef.
  * See docs/PROTOCOL.md.
  *
