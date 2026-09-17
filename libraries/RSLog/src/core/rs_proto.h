@@ -44,7 +44,7 @@ extern "C" {
  * receiver can measure the camera's colour response to each LED:
  * [dark 2P][ch0 P][dark P][ch1 P][dark P][ch2 P][dark 2P], P = RS_PILOT_P. */
 #define RS_MAX_CHANNELS       3
-#define RS_PILOT_P            8
+#define RS_PILOT_P            4     /* 4 chips per pulse: the block (9P = 36 chips) must fit inside the LED blob */
 #define RS_PILOT_CHIPS        (9 * RS_PILOT_P)
 
 #define RS_SEED_META          511
