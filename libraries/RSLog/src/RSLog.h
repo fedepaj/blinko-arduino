@@ -25,7 +25,7 @@ struct RSLogConfig {
     uint8_t  ch_pins[RS_MAX_CHANNELS][RSLOG_PINS_PER_CH] = { { LEDR, LED_BUILTIN }, { LEDG, RSLOG_NO_PIN }, { LEDB, RSLOG_NO_PIN } };
     uint8_t  ch_active_low[RS_MAX_CHANNELS][RSLOG_PINS_PER_CH] = { { 1, 0 }, { 1, 0 }, { 1, 0 } };
     uint8_t  channels = 3;                       /* 3 = independent RGB streams (3x throughput), 1 = all LEDs same stream */
-    uint16_t pilot_ms = 100;                     /* RGB colour-calibration pilots interval */
+    uint16_t pilot_ms = 30;                      /* RGB colour-calibration pilots interval; 36 chips every 30 ms = 3.6 % overhead, ~4x more pilots per second than 100 ms */
     uint8_t  fault_weight = 3;                   /* death loop: FAULT visits per other visit (1..4); 3 = fault reason in ~1-2 s */
     uint16_t burst_on_ms = 150;                  /* visible blink: transmit for burst_on_ms ... */
     uint16_t burst_off_ms = 50;                  /* ... then dark for burst_off_ms. 0 = continuous (user choice) */
