@@ -12,6 +12,8 @@
 extern "C" {
 #endif
 
+#define RS_TX_MAX_FAULT_WEIGHT 4
+
 typedef struct {
     uint8_t  valid;
     uint8_t  len;                 /* 1..31 (packed length if packed) */
@@ -28,7 +30,8 @@ typedef struct {
     uint8_t   next_log_slot;
 
     /* scheduler */
-    uint8_t   round[RS_NUM_SLOTS];
+    uint8_t   round[RS_NUM_SLOTS * RS_TX_MAX_FAULT_WEIGHT];
+    uint8_t   fault_weight;       /* FAULT visits per other visit in the round (1..RS_TX_MAX_FAULT_WEIGHT) */
     uint8_t   round_len;
     uint8_t   round_pos;
     rs_slot_t cur;                /* snapshot of the message being sent */
@@ -64,6 +67,10 @@ void rs_tx_clear_slot(rs_tx_t *tx, uint8_t id);
 
 /* Visible blink: transmit for on_chips, dark for off_chips (packet-aligned). */
 void rs_tx_set_burst(rs_tx_t *tx, uint32_t on_chips, uint32_t off_chips);
+/* Airtime of the FAULT slot: weight w inserts w-1 extra FAULT visits after every other visit
+ * (w=1: FAULT once per round; w=3: about 70 % of the packets). Used by the death loop so the
+ * fault reason completes in 1-2 s while the last logs still follow. */
+void rs_tx_set_fault_weight(rs_tx_t *tx, uint8_t w);
 
 /* Next (id, seed, payload) according to the carousel. */
 void rs_tx_next_packet(rs_tx_t *tx, uint8_t *id, uint16_t *seed, uint8_t *payload);

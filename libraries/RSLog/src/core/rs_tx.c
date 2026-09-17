@@ -9,6 +9,14 @@ void rs_tx_init(rs_tx_t *tx)
     for (size_t i = 0; i < sizeof(*tx); i++) p[i] = 0;
     for (int c = 0; c < RS_MAX_CHANNELS; c++) tx->chip_pos[c] = RS_PKT_CHIPS;   /* fetch on first chip */
     tx->nchan = 1;
+    tx->fault_weight = 1;
+}
+
+void rs_tx_set_fault_weight(rs_tx_t *tx, uint8_t w)
+{
+    if (w < 1) w = 1;
+    if (w > RS_TX_MAX_FAULT_WEIGHT) w = RS_TX_MAX_FAULT_WEIGHT;
+    tx->fault_weight = w;
 }
 
 void rs_tx_set_channels(rs_tx_t *tx, uint8_t nchan, uint32_t pilot_period)
@@ -61,12 +69,18 @@ void rs_tx_set_burst(rs_tx_t *tx, uint32_t on_chips, uint32_t off_chips)
     tx->burst_on = on_chips; tx->burst_off = off_chips; tx->burst_pos = 0; tx->in_pause = 0;
 }
 
-/* FAULT, STATUS, then log slots newest first. */
+/* FAULT, STATUS, then log slots newest first. With fault_weight w > 1 every other visit is
+ * followed by w-1 extra FAULT visits: [F S F F L1 F F L2 F F ...] for w = 3. */
 static void build_round(rs_tx_t *tx)
 {
     uint8_t n = 0;
-    if (tx->slots[RS_SLOT_FAULT].valid)  tx->round[n++] = RS_SLOT_FAULT;
-    if (tx->slots[RS_SLOT_STATUS].valid) tx->round[n++] = RS_SLOT_STATUS;
+    int fault = tx->slots[RS_SLOT_FAULT].valid;
+    uint8_t extra = fault ? (uint8_t)(tx->fault_weight - 1) : 0;
+    if (fault) tx->round[n++] = RS_SLOT_FAULT;
+    if (tx->slots[RS_SLOT_STATUS].valid) {
+        tx->round[n++] = RS_SLOT_STATUS;
+        for (uint8_t k = 0; k < extra; k++) tx->round[n++] = RS_SLOT_FAULT;
+    }
     uint8_t used = 0;
     for (;;) {
         int best = -1; uint32_t best_seq = 0;
@@ -77,6 +91,7 @@ static void build_round(rs_tx_t *tx)
         if (best < 0) break;
         used |= (uint8_t)(1u << best);
         tx->round[n++] = (uint8_t)best;
+        for (uint8_t k = 0; k < extra; k++) tx->round[n++] = RS_SLOT_FAULT;
     }
     tx->round_len = n;
     tx->round_pos = 0;

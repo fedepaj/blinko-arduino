@@ -316,6 +316,7 @@ void RSLogClass::_persistAndLoop(const char *text)
      * a human sees a blinking red LED and a phone reads the reason inside the blink. */
     uint32_t chip_us = RSLog._cfg.chip_us ? RSLog._cfg.chip_us : 30;
     rs_tx_set_channels(&ftx, 1, 0);
+    rs_tx_set_fault_weight(&ftx, RSLog._cfg.fault_weight);
     rs_tx_set_burst(&ftx, 150000u / chip_us, 50000u / chip_us);
     RSLog._writeAll(0);
     pinMode(RSLog._cfg.fault_pin, OUTPUT);
