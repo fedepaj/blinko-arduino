@@ -24,6 +24,18 @@ extern "C" __attribute__((used)) void rs_hardfault_c(uint32_t *frame)
     hex(t + 5, pc, 8);
     hex(t + 16, lr, 8);
     hex(t + 27, cfsr & 0xFFFF, 4);
+    /* mini backtrace: return addresses on the stack above the exception frame (odd Thumb
+     * addresses inside the 256 KB code flash), logged as ERROR and copied into the death loop */
+    {
+        char b[RS_MSG_MAX_LEN + 1] = "bt"; int n = 2, nb = 0;
+        for (int i = 8; i < 8 + 96 && nb < 3; i++) {
+            uint32_t w = frame[i];
+            if ((w & 1) && w >= 0x100 && w < 0x40000 && w != lr && w != (pc | 1)) {
+                b[n++] = ' '; hex(b + n, w, 5); n += 5; b[n] = 0; nb++;
+            }
+        }
+        if (nb) RSLog.log(RS_LVL_ERROR, "%s", b);
+    }
     RSLogClass::_persistAndLoop(t);
 }
 

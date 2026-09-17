@@ -262,6 +262,23 @@ void RSLogClass::info(const char *fmt, ...)  { va_list ap; va_start(ap, fmt); _v
 void RSLogClass::warn(const char *fmt, ...)  { va_list ap; va_start(ap, fmt); _vlog(RS_LVL_WARN, fmt, ap); va_end(ap); }
 void RSLogClass::error(const char *fmt, ...) { va_list ap; va_start(ap, fmt); _vlog(RS_LVL_ERROR, fmt, ap); va_end(ap); }
 
+size_t RSLogClass::write(uint8_t c)
+{
+    if (c == '\n' || c == '\r') {
+        if (_print_len) { _print_buf[_print_len] = 0; log(_print_level, "%s", _print_buf); _print_len = 0; }
+        return 1;
+    }
+    if (_print_len < sizeof(_print_buf) - 1) _print_buf[_print_len++] = (char)c;
+    return 1;
+}
+size_t RSLogClass::write(const uint8_t *buf, size_t n) { for (size_t i = 0; i < n; i++) write(buf[i]); return n; }
+void RSLogClass::printf(const char *fmt, ...)
+{
+    char buf[128]; va_list ap; va_start(ap, fmt); int n = vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
+    if (n > (int)sizeof(buf) - 1) n = sizeof(buf) - 1;
+    if (n > 0) write((const uint8_t *)buf, (size_t)n);
+}
+
 void RSLogClass::status(const char *fmt, ...)
 {
     char buf[RS_MSG_MAX_LEN + 1];

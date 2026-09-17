@@ -62,6 +62,7 @@ static void handle(String line)
     else if (cmd == "rgb")    { RSLog.setChannels(arg.toInt() == 1 ? 1 : 3); Serial.println(arg.toInt() == 1 ? "1 channel" : "3 channels (RGB)"); }
     else if (cmd == "chip")   { RSLog.setChipMicros(arg.toInt()); Serial.print("chip_us="); Serial.println(RSLog.chipMicros()); }
     else if (cmd == "strobe") { RSLog.strobe(arg.toFloat()); Serial.println(arg.toFloat() > 0 ? "strobe on" : "data mode"); }
+    else if (cmd == "print")  { RSLog.printf("%s n=%lu\n", arg.c_str(), (unsigned long)g_counter); }   /* Print interface: a line -> a message */
     else if (cmd == "led")    { arg.toLowerCase(); if (arg == "on") RSLog.ledTest(true); else if (arg == "off") RSLog.ledTest(false); else RSLog.setEnabled(true); }
     else if (cmd == "stat") {
         Serial.print("packets_sent="); Serial.println(RSLog.packetsSent());

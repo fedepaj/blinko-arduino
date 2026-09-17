@@ -46,8 +46,14 @@ struct rs_fault_record_t {
     char     text[RS_MSG_MAX_LEN + 1];
 };
 
-class RSLogClass {
+class RSLogClass : public Print {
 public:
+    /* Print interface: RSLog.print()/println()/printf() work like Serial; every line ('\n')
+     * becomes a message at printLevel (INFO by default). Useful to redirect existing prints. */
+    size_t write(uint8_t c) override;
+    size_t write(const uint8_t *buf, size_t n) override;
+    void printf(const char *fmt, ...);
+    void setPrintLevel(uint8_t level) { _print_level = level; }
     bool begin(const RSLogConfig &cfg = RSLogConfig());
     void end();
 
@@ -106,6 +112,8 @@ private:
     RSLogConfig _cfg;
     rs_tx_t _tx;
     char _fault_text[RS_MSG_MAX_LEN + 1] = { 0 };
+    char _print_buf[RS_MSG_MAX_LEN * 2 + 1];
+    uint8_t _print_len = 0, _print_level = RS_LVL_INFO;
     char _reset_cause[12] = "?";
     bool _running = false;
     bool _enabled = true;
