@@ -1,7 +1,7 @@
 .PHONY: build upload calib
 build:
-	./build.sh blinko_demo
+	./build.sh BlinkoDemo
 upload:
-	./build.sh blinko_demo upload
+	./build.sh BlinkoDemo upload
 calib:
-	./build.sh strobe_calib upload
+	./build.sh StrobeCalibration upload

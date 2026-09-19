@@ -77,7 +77,7 @@ static void handle(String line)
             Serial.print(tx.slots[i].packed ? " packed " : " raw "); Serial.print(tx.slots[i].len); Serial.println(" bytes");
         }
     }
-    else if (cmd.length()) Serial.println("? commands: info warn err debug status fatal hf hang clear chip strobe led stat");
+    else if (cmd.length()) Serial.println("? commands: info warn err debug print status fatal hf hang clear chip rgb burst strobe led stat");
 }
 
 void setup()

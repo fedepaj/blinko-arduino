@@ -1,0 +1,31 @@
+#######################################
+# Syntax colouring for the Blinko library
+#######################################
+
+Blinko	KEYWORD1
+BlinkoConfig	KEYWORD1
+
+begin	KEYWORD2
+end	KEYWORD2
+log	KEYWORD2
+debug	KEYWORD2
+info	KEYWORD2
+warn	KEYWORD2
+error	KEYWORD2
+status	KEYWORD2
+fatal	KEYWORD2
+checkpoint	KEYWORD2
+boardId	KEYWORD2
+hasFault	KEYWORD2
+faultText	KEYWORD2
+clearFault	KEYWORD2
+setChipMicros	KEYWORD2
+setBurst	KEYWORD2
+setChannels	KEYWORD2
+setEnabled	KEYWORD2
+setPrintLevel	KEYWORD2
+strobe	KEYWORD2
+ledTest	KEYWORD2
+packetsSent	KEYWORD2
+resetCause	KEYWORD2
+bootCount	KEYWORD2
