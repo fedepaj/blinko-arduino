@@ -68,7 +68,7 @@ void rs_tx_clear_slot(rs_tx_t *tx, uint8_t id);
 /* Visible blink: transmit for on_chips, dark for off_chips (packet-aligned). */
 void rs_tx_set_burst(rs_tx_t *tx, uint32_t on_chips, uint32_t off_chips);
 /* Airtime of the FAULT slot: weight w inserts w-1 extra FAULT visits after every other visit
- * (w=1: FAULT once per round; w=3: about 70 % of the packets). Used by the death loop so the
+ * (w=1: FAULT once per round; w=3: about 85 % of the packets). Used by the death loop so the
  * fault reason completes in 1-2 s while the last logs still follow. */
 void rs_tx_set_fault_weight(rs_tx_t *tx, uint8_t w);
 
