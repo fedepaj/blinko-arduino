@@ -157,9 +157,11 @@ bool BlinkoClass::begin(const BlinkoConfig &cfg)
 
     if (_cfg.announce_boot) status("boot#%lu rst=%s id=%04x", (unsigned long)fr.boot_count, _reset_cause, boardId());
 
-    rs_tx_set_burst(&_tx, (uint32_t)_cfg.burst_on_ms * 1000u / _cfg.chip_us, (uint32_t)_cfg.burst_off_ms * 1000u / _cfg.chip_us);
-    rs_tx_set_channels(&_tx, _cfg.channels, (uint32_t)_cfg.pilot_ms * 1000u / _cfg.chip_us);
-    _running = _startTimer(1.0e6f / (float)_cfg.chip_us);
+    uint32_t cell_us = cellMicros();
+    rs_tx_set_burst(&_tx, (uint32_t)_cfg.burst_on_ms * 1000u / cell_us, (uint32_t)_cfg.burst_off_ms * 1000u / cell_us);
+    rs_tx_set_channels(&_tx, _cfg.channels, (uint32_t)_cfg.pilot_ms * 1000u / cell_us);
+    rs_tx_set_repeat(&_tx, _cfg.repeat);
+    _running = _startTimer(1.0e6f / (float)cell_us);
     return _running;
 }
 
@@ -331,9 +333,10 @@ void BlinkoClass::_persistAndLoop(const char *text)
 
     /* Red LED of death: single stream on the fault pin only, always pulsed (150/50 ms) so
      * a human sees a blinking red LED and a phone reads the reason inside the blink. */
-    uint32_t chip_us = Blinko._cfg.chip_us ? Blinko._cfg.chip_us : 30;
+    uint32_t chip_us = (Blinko._cfg.chip_us ? Blinko._cfg.chip_us : 60) / RS_CELLS_PER_T;   /* cell period */
     rs_tx_set_channels(&ftx, 1, 0);
     rs_tx_set_fault_weight(&ftx, Blinko._cfg.fault_weight);
+    rs_tx_set_repeat(&ftx, Blinko._cfg.repeat);
     rs_tx_set_burst(&ftx, 150000u / chip_us, 50000u / chip_us);
     Blinko._writeAll(0);
     pinMode(Blinko._cfg.fault_pin, OUTPUT);
@@ -375,13 +378,14 @@ uint16_t BlinkoClass::boardId() const
 
 void BlinkoClass::setChipMicros(uint32_t us)
 {
-    if (us < 15) us = 15;
+    if (us < 24) us = 24;                          /* T >= 24 us: the timer cell (T/3) stays >= 8 us */
     _cfg.chip_us = us;
-    noInterrupts();
-    rs_tx_set_burst(&_tx, (uint32_t)_cfg.burst_on_ms * 1000u / us, (uint32_t)_cfg.burst_off_ms * 1000u / us);
-    rs_tx_set_channels(&_tx, _cfg.channels, (uint32_t)_cfg.pilot_ms * 1000u / us);
-    interrupts();
-    if (_running) s_timer.set_frequency(1.0e6f / (float)us);
+    if (_running) {
+        uint32_t cell_us = cellMicros();
+        rs_tx_set_burst(&_tx, (uint32_t)_cfg.burst_on_ms * 1000u / cell_us, (uint32_t)_cfg.burst_off_ms * 1000u / cell_us);
+        rs_tx_set_channels(&_tx, _cfg.channels, (uint32_t)_cfg.pilot_ms * 1000u / cell_us);
+        s_timer.set_frequency(1.0e6f / (float)cell_us);
+    }
 }
 
 void BlinkoClass::setBurst(uint16_t on_ms, uint16_t off_ms)
@@ -396,7 +400,7 @@ void BlinkoClass::setEnabled(bool on) { _enabled = on; if (!on) _writeAll(0); }
 
 void BlinkoClass::strobe(float hz)
 {
-    if (hz <= 0) { _strobe = false; if (_running) s_timer.set_frequency(1.0e6f / (float)_cfg.chip_us); return; }
+    if (hz <= 0) { _strobe = false; if (_running) s_timer.set_frequency(1.0e6f / (float)cellMicros()); return; }
     _strobe = true;
     if (_running) s_timer.set_frequency(2.0f * hz);   /* toggle twice per period */
 }
@@ -413,4 +417,10 @@ void BlinkoClass::setChannels(uint8_t n)
     noInterrupts();
     rs_tx_set_channels(&_tx, _cfg.channels, (uint32_t)_cfg.pilot_ms * 1000u / _cfg.chip_us);
     interrupts();
+}
+
+void BlinkoClass::setRepeat(uint8_t n)
+{
+    _cfg.repeat = n < 1 ? 1 : (n > 4 ? 4 : n);
+    noInterrupts(); rs_tx_set_repeat(&_tx, _cfg.repeat); interrupts();
 }

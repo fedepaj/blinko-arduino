@@ -8,6 +8,7 @@ void rs_tx_init(rs_tx_t *tx)
     uint8_t *p = (uint8_t *)tx;
     for (size_t i = 0; i < sizeof(*tx); i++) p[i] = 0;
     for (int c = 0; c < RS_MAX_CHANNELS; c++) tx->chip_pos[c] = RS_PKT_CHIPS;   /* fetch on first chip */
+    tx->repeat = 1;
     tx->nchan = 1;
     tx->fault_weight = 1;
 }
@@ -154,10 +155,17 @@ void rs_tx_next_packet(rs_tx_t *tx, uint8_t *id, uint16_t *seed, uint8_t *payloa
 
 static void fetch_packet(rs_tx_t *tx, int c)
 {
+    if (tx->rep_left[c] > 0) { tx->rep_left[c]--; tx->chip_pos[c] = 0; return; }   /* another copy of the same packet */
     uint8_t id, payload; uint16_t seed;
     rs_tx_next_packet(tx, &id, &seed, &payload);
     rs_encode_packet(id, seed, payload, tx->chips[c]);
     tx->chip_pos[c] = 0;
+    tx->rep_left[c] = (uint8_t)(tx->repeat > 1 ? tx->repeat - 1 : 0);
+}
+
+void rs_tx_set_repeat(rs_tx_t *tx, uint8_t n)
+{
+    tx->repeat = n < 1 ? 1 : (n > 4 ? 4 : n);
 }
 
 void rs_tx_next_chips(rs_tx_t *tx, uint8_t out[RS_MAX_CHANNELS])
@@ -198,3 +206,5 @@ uint8_t rs_tx_next_chip(rs_tx_t *tx)
     rs_tx_next_chips(tx, out);
     return out[0];
 }
+
+int rs_tx_encode(uint8_t id, uint16_t seed, uint8_t payload, uint8_t *chips) { return rs_encode_packet(id, seed, payload, chips); }

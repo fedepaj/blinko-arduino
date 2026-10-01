@@ -60,6 +60,7 @@ static void handle(String line)
     else if (cmd == "reset")  { Serial.println("software reset"); Serial.flush(); delay(50); NVIC_SystemReset(); }
     else if (cmd == "burst")  { int sp2 = arg.indexOf(' '); Blinko.setBurst(arg.toInt(), sp2 > 0 ? arg.substring(sp2 + 1).toInt() : 0); Serial.println("burst set"); }
     else if (cmd == "rgb")    { Blinko.setChannels(arg.toInt() == 1 ? 1 : 3); Serial.println(arg.toInt() == 1 ? "1 channel" : "3 channels (RGB)"); }
+    else if (cmd == "rep")    { Blinko.setRepeat(arg.toInt()); Serial.print("repeat="); Serial.println(arg.toInt()); }
     else if (cmd == "chip")   { Blinko.setChipMicros(arg.toInt()); Serial.print("chip_us="); Serial.println(Blinko.chipMicros()); }
     else if (cmd == "strobe") { Blinko.strobe(arg.toFloat()); Serial.println(arg.toFloat() > 0 ? "strobe on" : "data mode"); }
     else if (cmd == "print")  { Blinko.printf("%s n=%lu\n", arg.c_str(), (unsigned long)g_counter); }   /* Print interface: a line -> a message */
@@ -77,7 +78,7 @@ static void handle(String line)
             Serial.print(tx.slots[i].packed ? " packed " : " raw "); Serial.print(tx.slots[i].len); Serial.println(" bytes");
         }
     }
-    else if (cmd.length()) Serial.println("? commands: info warn err debug print status fatal hf hang clear chip rgb burst strobe led stat");
+    else if (cmd.length()) Serial.println("? commands: info warn err debug print status fatal hf hang clear chip rep rgb burst strobe led stat");
 }
 
 void setup()

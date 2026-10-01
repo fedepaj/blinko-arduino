@@ -55,6 +55,10 @@ typedef struct {
     uint8_t   chips[RS_MAX_CHANNELS][RS_PKT_CHIPS];
     uint8_t   chip_pos[RS_MAX_CHANNELS];
     uint32_t  packets_sent;
+    /* repetition: every packet is sent `repeat` times back to back (1 = off). A camera whose
+     * window is shorter than a packet still reads a whole one across two copies (cyclic decode). */
+    uint8_t   repeat;
+    uint8_t   rep_left[RS_MAX_CHANNELS];
 } rs_tx_t;
 
 void rs_tx_init(rs_tx_t *tx);
@@ -77,6 +81,8 @@ void rs_tx_next_packet(rs_tx_t *tx, uint8_t *id, uint16_t *seed, uint8_t *payloa
 
 /* RGB: 1 or 3 channels; pilot blocks every pilot_period chips (3-channel mode). */
 void rs_tx_set_channels(rs_tx_t *tx, uint8_t nchan, uint32_t pilot_period);
+/* Send every packet n times back to back (1..4; default 1). */
+void rs_tx_set_repeat(rs_tx_t *tx, uint8_t n);
 
 /* Next chips for all channels (out[0..2], each 0/1). Call once per T_chip.
  * In 1-channel mode out[1] and out[2] mirror out[0]. */
@@ -84,6 +90,8 @@ void rs_tx_next_chips(rs_tx_t *tx, uint8_t out[RS_MAX_CHANNELS]);
 
 /* Single-channel convenience: next chip of channel 0. */
 uint8_t rs_tx_next_chip(rs_tx_t *tx);
+/* rs_encode_packet as a linkable function (bindings, tests). */
+int rs_tx_encode(uint8_t id, uint16_t seed, uint8_t payload, uint8_t *chips);
 
 #ifdef __cplusplus
 }

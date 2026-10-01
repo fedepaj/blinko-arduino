@@ -14,6 +14,13 @@ mkdir -p "$HERE/build"
 arduino-cli compile --fqbn "$FQBN" --libraries "$HERE/libraries" --output-dir "$HERE/build/$SKETCH" \
     --warnings default "$HERE/libraries/Blinko/examples/$SKETCH"
 if [ "$2" = "upload" ]; then
+    # several boards connected: flash by USB serial (arduino-cli's dfu-util refuses two DFU devices)
+    N=$(arduino-cli board list 2>/dev/null | grep -c 'Nano R4')
+    if [ "$N" -gt 1 ] && [ -f "$HERE/../tools/flash_r4.py" ]; then
+        PY=${PY:-$HERE/../.venv/bin/python}
+        [ -n "$PORT" ] || { echo "several Nano R4 connected: set PORT=/dev/cu.usbmodemXXX" >&2; exit 2; }
+        exec "$PY" "$HERE/../tools/flash_r4.py" --port "$PORT" --bin "$HERE/build/$SKETCH/$SKETCH.ino.bin"
+    fi
     PORT=${PORT:-$(arduino-cli board list 2>/dev/null | awk '/nanor4|Nano R4/ {print $1; exit}')}
     if [ -z "$PORT" ]; then
         PORT=$(ls /dev/cu.usbmodem* 2>/dev/null | head -1)

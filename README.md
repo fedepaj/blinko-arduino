@@ -35,7 +35,7 @@ into your sketchbook `libraries/` folder.
 ```cpp
 #include <Blinko.h>
 void setup() {
-  Blinko.begin();                    // 30 µs/chip, RGB LED + LED_BUILTIN
+  Blinko.begin();                    // T = 60 µs, RGB LED + LED_BUILTIN
   Blinko.info("boot ok");
   Blinko.checkpoint("init-sensors"); // reported if a watchdog reset follows
   if (!sensor.begin()) Blinko.fatal(3, "sensor init");   // never returns
@@ -57,7 +57,8 @@ void loop() { Blinko.status("up=%lus", millis() / 1000); }
 | `setPrintLevel(level)` | level used by the `Print` interface (default `RS_LVL_INFO`) |
 | `boardId()` | 16-bit id from the MCU unique id, announced as `id=xxxx` |
 | `hasFault()`, `faultText()`, `clearFault()` | state of the FAULT slot (7) and of the persisted record |
-| `setChipMicros(us)` / `chipMicros()` | chip duration, clamped to ≥ 15 µs (re-tunes burst and pilots) |
+| `setChipMicros(us)` / `chipMicros()` / `cellMicros()` | T, the shortest run of the line code, clamped to ≥ 24 µs; the timer runs at T/3 = `cellMicros()` (re-tunes burst and pilots) |
+| `setRepeat(n)` | send every packet n times back to back (1–4); for cameras whose window is shorter than a packet |
 | `setBurst(on_ms, off_ms)` | visible blink; `off_ms = 0` transmits continuously |
 | `setChannels(n)` | 3 = independent RGB streams, 1 = one stream on every LED |
 | `setEnabled(on)`, `ledTest(on)` | pause/resume the output, or hold every LED on (polarity check) |
@@ -68,7 +69,8 @@ void loop() { Blinko.status("up=%lus", millis() / 1000); }
 
 | Field | Default | Meaning |
 |---|---|---|
-| `chip_us` | `30` | half-bit duration; must be ≥ 4 camera row times (see `docs/CALIBRATION.md`) |
+| `chip_us` | `60` | T, the shortest run of the line code (µs): keep it above the phone's exposure; the timer runs at T/3 (see `docs/CALIBRATION.md`) |
+| `repeat` | `1` | copies of every packet (1–4); 2–3 for 30 fps phones whose blob is shorter than a packet |
 | `ch_pins` / `ch_active_low` | `{LEDR, LED_BUILTIN}, {LEDG}, {LEDB}` | up to 2 pins per channel and their polarity |
 | `channels` | `3` | 3 = RGB streams (3× throughput), 1 = same stream everywhere |
 | `pilot_ms` | `30` | interval between RGB colour-calibration pilots (36 chips each, 3.6 % overhead) |

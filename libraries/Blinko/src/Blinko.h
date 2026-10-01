@@ -20,12 +20,13 @@
 #define BLINKO_CHECKPOINT_LEN 16
 
 struct BlinkoConfig {
-    uint32_t chip_us = 30;                       /* half-bit duration; iPhone 14: 5 us/row -> ~6 rows/chip */
+    uint32_t chip_us = 60;                       /* minimum run T of the line code (RLL(2,7)): keep >= the phone's exposure; the timer runs at T / RS_CELLS_PER_T */
     /* LEDs per channel (RGB streams). Channel 0 = red (+ LED_BUILTIN mirrors it), 1 = green, 2 = blue. */
     uint8_t  ch_pins[RS_MAX_CHANNELS][BLINKO_PINS_PER_CH] = { { LEDR, LED_BUILTIN }, { LEDG, BLINKO_NO_PIN }, { LEDB, BLINKO_NO_PIN } };
     uint8_t  ch_active_low[RS_MAX_CHANNELS][BLINKO_PINS_PER_CH] = { { 1, 0 }, { 1, 0 }, { 1, 0 } };
     uint8_t  channels = 3;                       /* 3 = independent RGB streams (3x throughput), 1 = all LEDs same stream */
     uint16_t pilot_ms = 30;                      /* RGB colour-calibration pilots interval; 36 chips every 30 ms = 3.6 % overhead, ~4x more pilots per second than 100 ms */
+    uint8_t  repeat = 1;                         /* send every packet n times back to back: phones whose window is shorter than a packet (30 fps Android) read it across two copies */
     uint8_t  fault_weight = 3;                   /* death loop: FAULT visits per other visit (1..4); 3 = fault reason in ~1-2 s */
     uint16_t burst_on_ms = 150;                  /* visible blink: transmit for burst_on_ms ... */
     uint16_t burst_off_ms = 50;                  /* ... then dark for burst_off_ms. 0 = continuous (user choice) */
@@ -86,7 +87,9 @@ public:
     void setChipMicros(uint32_t us);
     void setBurst(uint16_t on_ms, uint16_t off_ms);   /* visible blink; off_ms = 0 -> continuous */
     void setChannels(uint8_t n);                       /* 3 = RGB streams, 1 = all LEDs same stream */
+    void setRepeat(uint8_t n);                         /* 1..4 copies of every packet */
     uint32_t chipMicros() const { return _cfg.chip_us; }
+    uint32_t cellMicros() const { return _cfg.chip_us / RS_CELLS_PER_T; }   /* timer period: one code cell */
     void setEnabled(bool on);
     void strobe(float hz);                       /* calibration square wave; strobe(0) resumes data */
     void ledTest(bool on);                       /* all LEDs steady on/off (polarity check) */
