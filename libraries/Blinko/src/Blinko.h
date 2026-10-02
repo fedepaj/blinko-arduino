@@ -27,6 +27,9 @@ struct BlinkoConfig {
     uint8_t  channels = 3;                       /* 3 = independent RGB streams (3x throughput), 1 = all LEDs same stream */
     uint16_t pilot_ms = 30;                      /* RGB colour-calibration pilots interval; 36 chips every 30 ms = 3.6 % overhead, ~4x more pilots per second than 100 ms */
     uint8_t  repeat = 1;                         /* send every packet n times back to back: phones whose window is shorter than a packet (30 fps Android) read it across two copies */
+    uint8_t  brightness = 100;                   /* lit level in percent through a ~240 kHz PWM on the LED pins (100 = plain on/off): a phone a centimetre away saturates on a full-brightness LED and loses the short gaps; 30-50 % keeps the stripes in range */
+    uint32_t fault_chip_us = 120;                /* death loop timing: the most conservative values that decoded on every phone tried (a 57 us-exposure Android needs T >= 90 us and 2-3 copies; the iPhone loses little): T = 120 us ... */
+    uint8_t  fault_repeat = 3;                   /* ... and 3 copies of every packet, so a 30 fps phone reads a packet across two copies */
     uint8_t  fault_weight = 3;                   /* death loop: FAULT visits per other visit (1..4); 3 = fault reason in ~1-2 s */
     uint16_t burst_on_ms = 150;                  /* visible blink: transmit for burst_on_ms ... */
     uint16_t burst_off_ms = 50;                  /* ... then dark for burst_off_ms. 0 = continuous (user choice) */
@@ -88,6 +91,10 @@ public:
     void setBurst(uint16_t on_ms, uint16_t off_ms);   /* visible blink; off_ms = 0 -> continuous */
     void setChannels(uint8_t n);                       /* 3 = RGB streams, 1 = all LEDs same stream */
     void setRepeat(uint8_t n);                         /* 1..100 copies of every packet: 2-3 for 30 fps phones, 20-60 for far lights (stitching) */
+    void setBrightness(uint8_t percent);               /* 1..100: lit level by PWM (see BlinkoConfig::brightness); 100 = plain on/off */
+    uint8_t brightness() const { return _cfg.brightness; }
+    const char *timerInfo();
+    const char *pfsInfo();                              /* diagnostics: red LED pin function register, lit / dark / current */                            /* diagnostics: chip timer type/channel, running, PWM active */
     uint32_t chipMicros() const { return _cfg.chip_us; }
     uint32_t cellMicros() const { return _cfg.chip_us / RS_CELLS_PER_T; }   /* timer period: one code cell */
     void setEnabled(bool on);
@@ -103,6 +110,7 @@ public:
     void _tick();
     void _writeChips(const uint8_t chips[RS_MAX_CHANNELS]);
     void _writeAll(uint8_t level);
+    void _applyBrightness();
     static void _persistAndLoop(const char *text) __attribute__((noreturn));
 
 private:

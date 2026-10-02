@@ -165,7 +165,7 @@ static void fetch_packet(rs_tx_t *tx, int c)
 
 void rs_tx_set_repeat(rs_tx_t *tx, uint8_t n)
 {
-    tx->repeat = n < 1 ? 1 : (n > 4 ? 4 : n);
+    tx->repeat = n < 1 ? 1 : (n > 100 ? 100 : n);   /* 2-3 for a frame-sized window; 20-60 for stitching across frames */
 }
 
 void rs_tx_next_chips(rs_tx_t *tx, uint8_t out[RS_MAX_CHANNELS])

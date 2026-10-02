@@ -4,16 +4,27 @@
  * Point the phone app at the board. Serial (115200) commands:
  *   info <text> | warn <text> | err <text> | debug <text>   log a message
  *   status <text>        set the STATUS slot
+ *   print <text>         Print interface: a line becomes a message
  *   fatal <text>         record a fatal reason and blink it forever (reset to recover)
  *   hf                   provoke a real hard fault (bus fault) -> handler transmits it
  *   hang                 stop kicking the watchdog -> WDT reset, reported at next boot
  *   clear                clear the persisted fault record
- *   chip <us>            set chip duration (default 30 us)
+ *   chip <us>            T, the shortest run of the line code (default 60 us; the timer runs at T/3)
+ *   rep <n>              copies of every packet, 1..100 (default 1)
+ *   bright <percent>     lit level by PWM, 1..100 (default 100): lower it when the phone saturates
  *   rgb 3|1              RGB streams (default) or single stream on all LEDs
  *   burst <on> <off>     visible blink in ms (off 0 = continuous)
  *   strobe <hz>          calibration square wave (docs/CALIBRATION.md); "strobe 0" resumes
  *   led on|off           steady LEDs (polarity check)
  *   stat                 print transmitter state
+ *
+ * Settings that measured best (October 2026, board 1-2 cm from the camera):
+ *   iPhone 14, 120 fps, 15 us exposure:     chip 45..60, rep 1 (rep 2 when the blob is cut)  -> ~100 packets/s
+ *   Samsung S21 FE, 30 fps RAW, 57 us exp.:  chip 105..120, rep 3                              -> 20-50 packets/s
+ *   a LED bright but not blinding (2-5 cm):                         bright 30..50 (at 1 cm it does not help: the core stays clipped and the halo fades)
+ *   a light too small or far for a whole packet per frame:          rep 40..80 (stitching across frames)
+ * The red LED of death does not use these: it always sends at chip 120, rep 3 (BlinkoConfig
+ * fault_chip_us / fault_repeat), the conservative setting every phone tried could read.
  *
  * Hardware demo: short D2 to D3 -> real hard fault -> red LED of death
  * (recover with RESET; the record is persisted and re-sent after reboot).
@@ -61,10 +72,13 @@ static void handle(String line)
     else if (cmd == "burst")  { int sp2 = arg.indexOf(' '); Blinko.setBurst(arg.toInt(), sp2 > 0 ? arg.substring(sp2 + 1).toInt() : 0); Serial.println("burst set"); }
     else if (cmd == "rgb")    { Blinko.setChannels(arg.toInt() == 1 ? 1 : 3); Serial.println(arg.toInt() == 1 ? "1 channel" : "3 channels (RGB)"); }
     else if (cmd == "rep")    { Blinko.setRepeat(arg.toInt()); Serial.print("repeat="); Serial.println(arg.toInt()); }
+    else if (cmd == "bright") { Blinko.setBrightness(arg.toInt()); Serial.print("brightness="); Serial.println(Blinko.brightness()); }
     else if (cmd == "chip")   { Blinko.setChipMicros(arg.toInt()); Serial.print("chip_us="); Serial.println(Blinko.chipMicros()); }
     else if (cmd == "strobe") { Blinko.strobe(arg.toFloat()); Serial.println(arg.toFloat() > 0 ? "strobe on" : "data mode"); }
     else if (cmd == "print")  { Blinko.printf("%s n=%lu\n", arg.c_str(), (unsigned long)g_counter); }   /* Print interface: a line -> a message */
     else if (cmd == "led")    { arg.toLowerCase(); if (arg == "on") Blinko.ledTest(true); else if (arg == "off") Blinko.ledTest(false); else Blinko.setEnabled(true); }
+    else if (cmd == "timer")  { Serial.println(Blinko.timerInfo()); }
+    else if (cmd == "pfs")    { Serial.println(Blinko.pfsInfo()); }
     else if (cmd == "stat") {
         Serial.print("packets_sent="); Serial.println(Blinko.packetsSent());
         Serial.print("chip_us="); Serial.println(Blinko.chipMicros());

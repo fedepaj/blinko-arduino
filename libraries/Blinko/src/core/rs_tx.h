@@ -82,7 +82,7 @@ void rs_tx_next_packet(rs_tx_t *tx, uint8_t *id, uint16_t *seed, uint8_t *payloa
 /* RGB: 1 or 3 channels; pilot blocks every pilot_period chips (3-channel mode). */
 void rs_tx_set_channels(rs_tx_t *tx, uint8_t nchan, uint32_t pilot_period);
 /* Send every packet n times back to back (1..4; default 1). */
-void rs_tx_set_repeat(rs_tx_t *tx, uint8_t n);
+void rs_tx_set_repeat(rs_tx_t *tx, uint8_t n);   /* 1..100 copies of every packet */
 
 /* Next chips for all channels (out[0..2], each 0/1). Call once per T_chip.
  * In 1-channel mode out[1] and out[2] mirror out[0]. */

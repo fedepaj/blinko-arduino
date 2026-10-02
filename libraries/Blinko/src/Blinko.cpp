@@ -1,5 +1,6 @@
 #include "Blinko.h"
 #include <FspTimer.h>
+#include <pwm.h>
 #include <DataFlashBlockDevice.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -24,6 +25,10 @@ BlinkoClass Blinko;
 #define blinko_fault_record (*(rs_fault_record_t *)BLINKO_RECORD_ADDR)
 
 static FspTimer s_timer;
+static uint8_t s_timer_type = 255, s_timer_ch = 255, s_timer_step = 0;   /* for diagnostics */
+static volatile uint32_t s_ticks = 0;
+static PwmOut *s_pwm[RS_MAX_CHANNELS][BLINKO_PINS_PER_CH];   /* one per LED pin while brightness < 100 */
+#define BLINKO_PWM_HZ 240000.0f                              /* carrier well above a camera exposure (a 15 us row sees 3-4 periods); 1 MHz left the GPT too few counts and the LED dark */
 
 struct rs_ee_record_t { uint32_t magic; uint32_t boot_count; char text[RS_MSG_MAX_LEN + 1]; };
 
@@ -59,15 +64,90 @@ static void timer_cb(timer_callback_args_t *) { Blinko._tick(); }
 
 /* ---------------------------------------------------------------- pins */
 
+/* Dimmed output. The LED pin runs a hardware PWM at the brightness duty and the chip only
+ * decides what the pin is connected to: the timer output (lit) or a plain GPIO at the off level
+ * (dark). That is one write of the pin's function register per chip, safe inside the chip
+ * interrupt; calling the PWM driver from there (duty changes) hung the MCU. */
+static volatile uint32_t *s_pfs_reg[RS_MAX_CHANNELS][BLINKO_PINS_PER_CH];
+static uint32_t s_pfs_on[RS_MAX_CHANNELS][BLINKO_PINS_PER_CH], s_pfs_off[RS_MAX_CHANNELS][BLINKO_PINS_PER_CH];
+static inline void pfs_write(volatile uint32_t *reg, uint32_t v)
+{
+    R_BSP_PinAccessEnable();                            /* the BSP's unlock of the pin function registers (counted, interrupt-safe) */
+    *reg = v;
+    R_BSP_PinAccessDisable();
+}
+
+/* Diagnostics: the pin function register of the red LED as configured for lit / dark and now. */
+const char *BlinkoClass::pfsInfo()
+{
+    static char buf[80];
+    volatile uint32_t *reg = s_pfs_reg[0][0];
+    snprintf(buf, sizeof(buf), "pfs on %08lx off %08lx now %08lx", (unsigned long)s_pfs_on[0][0], (unsigned long)s_pfs_off[0][0], reg ? (unsigned long)*reg : 0ul);
+    return buf;
+}
+
 void BlinkoClass::_writeChips(const uint8_t chips[RS_MAX_CHANNELS])
 {
     for (uint8_t c = 0; c < RS_MAX_CHANNELS; c++) {
         for (uint8_t k = 0; k < BLINKO_PINS_PER_CH; k++) {
             uint8_t pin = _cfg.ch_pins[c][k];
             if (pin == BLINKO_NO_PIN) continue;
-            digitalWrite(pin, (chips[c] ^ _cfg.ch_active_low[c][k]) ? HIGH : LOW);
+            if (s_pfs_reg[c][k]) pfs_write(s_pfs_reg[c][k], chips[c] ? s_pfs_on[c][k] : s_pfs_off[c][k]);
+            else digitalWrite(pin, (chips[c] ^ _cfg.ch_active_low[c][k]) ? HIGH : LOW);
         }
     }
+}
+
+/* Brightness below 100 % puts every LED pin on a hardware PWM (the Nano R4's LED pins sit on
+ * GPT channels: red 5A, green 6B, blue 6A, builtin 4B) at a fixed duty; the chips then switch
+ * the pin between that output and a GPIO at the off level (see _writeChips). */
+void BlinkoClass::_applyBrightness()
+{
+    for (uint8_t c = 0; c < RS_MAX_CHANNELS; c++) {
+        for (uint8_t k = 0; k < BLINKO_PINS_PER_CH; k++) {
+            uint8_t pin = _cfg.ch_pins[c][k];
+            if (pin == BLINKO_NO_PIN) continue;
+            float duty = _cfg.ch_active_low[c][k] ? 100.0f - (float)_cfg.brightness : (float)_cfg.brightness;
+            if (_cfg.brightness >= 100) {
+                s_pfs_reg[c][k] = nullptr;
+                if (s_pwm[c][k]) { s_pwm[c][k]->end(); delete s_pwm[c][k]; s_pwm[c][k] = nullptr; }
+                pinMode(pin, OUTPUT); digitalWrite(pin, _cfg.ch_active_low[c][k] ? HIGH : LOW);
+                continue;
+            }
+            if (!s_pwm[c][k]) {
+                s_pwm[c][k] = new PwmOut(pin);
+                if (!s_pwm[c][k]->begin(BLINKO_PWM_HZ, duty)) { delete s_pwm[c][k]; s_pwm[c][k] = nullptr; s_pfs_reg[c][k] = nullptr; continue; }
+            } else {
+                s_pwm[c][k]->pulse_perc(duty);
+            }
+            bsp_io_port_pin_t pp = g_pin_cfg[pin].pin;
+            volatile uint32_t *reg = &R_PFS->PORT[pp >> 8].PIN[pp & 0xFF].PmnPFS;
+            s_pfs_on[c][k] = *reg;                                       /* the function PwmOut configured (PMR set, PSEL = GPT) */
+            /* dark: the same register with PMR cleared (GPIO instead of the timer output) and the
+             * GPIO driven at the off level; PSEL stays, since it must not change while PMR is set */
+            s_pfs_off[c][k] = (s_pfs_on[c][k] & ~(1u << 16)) | (1u << 2) | (_cfg.ch_active_low[c][k] ? 1u : 0u);
+            s_pfs_reg[c][k] = reg;
+        }
+    }
+}
+
+const char *BlinkoClass::timerInfo()
+{
+    static char buf[96];
+    snprintf(buf, sizeof(buf), "timer %s ch %d step %d running %d ticks %lu pwm %d", s_timer_type == AGT_TIMER ? "AGT" : s_timer_type == GPT_TIMER ? "GPT" : "none", (int)s_timer_ch, (int)s_timer_step, (int)_running, (unsigned long)s_ticks, (int)(s_pwm[0][0] != nullptr));
+    return buf;
+}
+
+void BlinkoClass::setBrightness(uint8_t percent)
+{
+    _cfg.brightness = percent < 1 ? 1 : (percent > 100 ? 100 : percent);
+    /* the PWM channels are claimed with the chip timer stopped, then the chip timer restarts on
+     * a channel that is still free: PwmOut::begin re-initializes its GPT channel, and the core's
+     * timer allocation does not know which channels the LED pins will take */
+    bool was_running = _running;
+    if (was_running) { s_timer.stop(); s_timer.end(); _running = false; }
+    _applyBrightness();
+    if (was_running) _running = _startTimer(1.0e6f / (float)cellMicros());   /* (a strobe in progress resumes as data) */
 }
 
 void BlinkoClass::_writeAll(uint8_t level)
@@ -78,6 +158,7 @@ void BlinkoClass::_writeAll(uint8_t level)
 
 void BlinkoClass::_tick()
 {
+    s_ticks++;
     if (!_enabled) return;
     if (_strobe) { _strobe_level ^= 1; _writeAll(_strobe_level); return; }
     uint8_t chips[RS_MAX_CHANNELS];
@@ -89,14 +170,26 @@ void BlinkoClass::_tick()
 
 bool BlinkoClass::_startTimer(float hz)
 {
+    /* The LED pins' PWM (brightness) lives on GPT channels (Nano R4: red 5A, green 6B, blue 6A,
+     * builtin 4B) and PwmOut::begin re-initializes its channel, which would silence a chip timer
+     * there: those channels are reserved before the chip timer picks one. (An AGT would not
+     * collide, but the AGT overflow interrupt did not fire through FspTimer on this core.) */
+    for (uint8_t c = 0; c < RS_MAX_CHANNELS; c++)
+        for (uint8_t k = 0; k < BLINKO_PINS_PER_CH; k++) {
+            uint8_t pin = _cfg.ch_pins[c][k];
+            if (pin == BLINKO_NO_PIN) continue;
+            auto cfgs = getPinCfgs(pin, PIN_CFG_REQ_PWM);
+            if (cfgs[0]) FspTimer::set_initial_timer_channel_as_pwm(GPT_TIMER, GET_CHANNEL(cfgs[0]));
+        }
     uint8_t type = GPT_TIMER;
     int8_t ch = FspTimer::get_available_timer(type);
     if (ch < 0) ch = FspTimer::get_available_timer(type, true);
+    s_timer_type = type; s_timer_ch = (uint8_t)ch; s_timer_step = 0;
     if (ch < 0) return false;
-    if (!s_timer.begin(TIMER_MODE_PERIODIC, type, (uint8_t)ch, hz, 50.0f, timer_cb, nullptr)) return false;
-    if (!s_timer.setup_overflow_irq()) return false;
-    if (!s_timer.open()) return false;
-    return s_timer.start();
+    s_timer_step = 1; if (!s_timer.begin(TIMER_MODE_PERIODIC, type, (uint8_t)ch, hz, 50.0f, timer_cb, nullptr)) return false;
+    s_timer_step = 2; if (!s_timer.setup_overflow_irq()) return false;
+    s_timer_step = 3; if (!s_timer.open()) return false;
+    s_timer_step = 4; return s_timer.start();
 }
 
 /* --------------------------------------------------------------- begin */
@@ -108,6 +201,7 @@ bool BlinkoClass::begin(const BlinkoConfig &cfg)
     for (uint8_t c = 0; c < RS_MAX_CHANNELS; c++)
         for (uint8_t k = 0; k < BLINKO_PINS_PER_CH; k++)
             if (_cfg.ch_pins[c][k] != BLINKO_NO_PIN) pinMode(_cfg.ch_pins[c][k], OUTPUT);
+    if (_cfg.brightness < 100) _applyBrightness();      /* before the chip timer: its channel must stay clear of the LED pins' */
     pinMode(_cfg.fault_pin, OUTPUT);
     _writeAll(0);
 
@@ -332,12 +426,18 @@ void BlinkoClass::_persistAndLoop(const char *text)
     rs_tx_set_slot(&ftx, RS_SLOT_FAULT, RS_LVL_FAULT, fr.text, strlen(fr.text));
 
     /* Red LED of death: single stream on the fault pin only, always pulsed (150/50 ms) so
-     * a human sees a blinking red LED and a phone reads the reason inside the blink. */
-    uint32_t chip_us = (Blinko._cfg.chip_us ? Blinko._cfg.chip_us : 60) / RS_CELLS_PER_T;   /* cell period */
+     * a human sees a blinking red LED and a phone reads the reason inside the blink. Its
+     * timing is the conservative fault_chip_us / fault_repeat (defaults T = 120 us, 3 copies),
+     * not the running configuration: whoever picks the phone up must be able to read it. */
+    uint32_t chip_us = (Blinko._cfg.fault_chip_us ? Blinko._cfg.fault_chip_us : 120) / RS_CELLS_PER_T;   /* cell period */
     rs_tx_set_channels(&ftx, 1, 0);
     rs_tx_set_fault_weight(&ftx, Blinko._cfg.fault_weight);
-    rs_tx_set_repeat(&ftx, Blinko._cfg.repeat);
+    rs_tx_set_repeat(&ftx, Blinko._cfg.fault_repeat ? Blinko._cfg.fault_repeat : 3);
     rs_tx_set_burst(&ftx, 150000u / chip_us, 50000u / chip_us);
+    for (uint8_t c = 0; c < RS_MAX_CHANNELS; c++) for (uint8_t k = 0; k < BLINKO_PINS_PER_CH; k++)
+        { s_pfs_reg[c][k] = nullptr; if (s_pwm[c][k]) { s_pwm[c][k]->end(); s_pwm[c][k] = nullptr; } }   /* plain GPIO from here: no timers, no interrupts */
+    for (uint8_t c = 0; c < RS_MAX_CHANNELS; c++) for (uint8_t k = 0; k < BLINKO_PINS_PER_CH; k++)
+        if (Blinko._cfg.ch_pins[c][k] != BLINKO_NO_PIN) pinMode(Blinko._cfg.ch_pins[c][k], OUTPUT);
     Blinko._writeAll(0);
     pinMode(Blinko._cfg.fault_pin, OUTPUT);
 
