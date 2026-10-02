@@ -46,6 +46,23 @@ size_t rs_pack6(const char *text, size_t len, uint8_t *out, size_t out_cap)
     return (n < len) ? n : 0;
 }
 
+size_t rs_pack6_fit(const char *text, size_t len, uint8_t *out, size_t out_cap, size_t *consumed)
+{
+    bw_t w = { out, out_cap, 0 };
+    size_t i = 0;
+    for (; i < len; i++) {
+        int shift, s = sym_of(text[i], &shift);
+        size_t need = s < 0 ? 14u : (shift ? 12u : 6u);          /* a character goes in whole or not at all */
+        if (w.nbits + need > out_cap * 8u) break;
+        if (s < 0) { put_bits(&w, SYM_ESC, 6); put_bits(&w, (uint8_t)text[i], 8); }
+        else { if (shift) put_bits(&w, SYM_SHIFT, 6); put_bits(&w, (uint32_t)s, 6); }
+    }
+    size_t n = (w.nbits + 7) >> 3;
+    while (w.nbits & 7) put_bits(&w, 1, 1);                       /* pad with 1s, as rs_pack6 */
+    *consumed = i;
+    return n;
+}
+
 size_t rs_unpack6(const uint8_t *in, size_t len, char *text, size_t text_cap)
 {
     size_t nbits = len * 8, pos = 0, n = 0;

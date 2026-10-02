@@ -29,3 +29,14 @@ ledTest	KEYWORD2
 packetsSent	KEYWORD2
 resetCause	KEYWORD2
 bootCount	KEYWORD2
+setRepeat	KEYWORD2
+setBrightness	KEYWORD2
+brightness	KEYWORD2
+repeat	KEYWORD2
+channels	KEYWORD2
+printf	KEYWORD2
+chipMicros	KEYWORD2
+cellMicros	KEYWORD2
+flashSelfTest	KEYWORD2
+timerInfo	KEYWORD2
+pfsInfo	KEYWORD2

@@ -7,7 +7,7 @@ void rs_tx_init(rs_tx_t *tx)
 {
     uint8_t *p = (uint8_t *)tx;
     for (size_t i = 0; i < sizeof(*tx); i++) p[i] = 0;
-    for (int c = 0; c < RS_MAX_CHANNELS; c++) tx->chip_pos[c] = RS_PKT_CHIPS;   /* fetch on first chip */
+    for (int c = 0; c < RS_MAX_CHANNELS; c++) tx->chip_pos[c] = RS_PKT_CHIPS;   /* a packet boundary on the first chip */
     tx->repeat = 1;
     tx->nchan = 1;
     tx->fault_weight = 1;
@@ -41,39 +41,61 @@ void rs_tx_set_channels(rs_tx_t *tx, uint8_t nchan, uint32_t pilot_period)
     tx->pilot_period = (tx->nchan == 3) ? pilot_period : 0;
     tx->pilot_pos = 0; tx->in_pilot = 0;
     tx->pilot_next = pilot_interval(tx->pilot_period, tx->pilot_count);
+    /* Every channel restarts at a packet boundary. The channels advance in lockstep only while
+     * they are all in use: after a change of their number the positions of the ones that were
+     * idle are stale, and they used to run past the end of chips[] (and of the structure)
+     * until channel 0 reached its boundary. Packets prepared for the old number are dropped. */
+    for (int c = 0; c < RS_MAX_CHANNELS; c++) tx->chip_pos[c] = RS_PKT_CHIPS;
+    tx->rep_left = 0; tx->next_ready = 0;
 }
 
-static void slot_fill(rs_slot_t *s, uint8_t level, const char *text, size_t len, uint32_t seq)
+size_t rs_tx_slot_prepare(rs_slot_t *s, uint8_t level, const char *text, size_t len)
 {
-    uint8_t packed[RS_MSG_MAX_LEN];
-    size_t plen = rs_pack6(text, len, packed, sizeof(packed));
-    if (plen > 0) {
-        rs_memcpy(s->data, packed, plen);
+    size_t taken = 0;
+    size_t plen = rs_pack6_fit(text, len, s->data, RS_MSG_MAX_LEN, &taken);
+    /* packed when that carries more text than the raw bytes would, or the same text in fewer bytes */
+    if (taken > RS_MSG_MAX_LEN || (taken == len && plen < len)) {
         s->len = (uint8_t)plen; s->packed = 1;
     } else {
-        if (len > RS_MSG_MAX_LEN) len = RS_MSG_MAX_LEN;
-        if (len == 0) { s->valid = 0; return; }
-        rs_memcpy(s->data, (const uint8_t *)text, len);
-        s->len = (uint8_t)len; s->packed = 0;
+        taken = len > RS_MSG_MAX_LEN ? RS_MSG_MAX_LEN : len;
+        rs_memcpy(s->data, (const uint8_t *)text, taken);
+        s->len = (uint8_t)taken; s->packed = 0;
     }
     s->level = (uint8_t)(level & 7u);
-    s->seq = seq;
+    s->seq = 0;
     s->next_seed = 0;
-    s->valid = 1;
+    s->valid = taken > 0;
+    return taken;
+}
+
+void rs_tx_put_slot(rs_tx_t *tx, uint8_t id, const rs_slot_t *s)
+{
+    if (id >= RS_NUM_SLOTS) return;
+    tx->slots[id] = *s;
+    tx->slots[id].seq = ++tx->seq_counter;
+}
+
+uint8_t rs_tx_log_slot(rs_tx_t *tx, const rs_slot_t *s)
+{
+    if (!s->valid) return RS_NUM_SLOTS;                    /* an empty text does not take a log slot */
+    uint8_t id = tx->next_log_slot;
+    tx->next_log_slot = (uint8_t)((id + 1) % RS_NUM_LOG_SLOTS);
+    rs_tx_put_slot(tx, id, s);
+    return id;
 }
 
 uint8_t rs_tx_log(rs_tx_t *tx, uint8_t level, const char *text, size_t len)
 {
-    uint8_t id = tx->next_log_slot;
-    tx->next_log_slot = (uint8_t)((id + 1) % RS_NUM_LOG_SLOTS);
-    slot_fill(&tx->slots[id], level, text, len, ++tx->seq_counter);
-    return id;
+    rs_slot_t s;
+    rs_tx_slot_prepare(&s, level, text, len);
+    return rs_tx_log_slot(tx, &s);
 }
 
 void rs_tx_set_slot(rs_tx_t *tx, uint8_t id, uint8_t level, const char *text, size_t len)
 {
-    if (id >= RS_NUM_SLOTS) return;
-    slot_fill(&tx->slots[id], level, text, len, ++tx->seq_counter);
+    rs_slot_t s;
+    rs_tx_slot_prepare(&s, level, text, len);              /* an empty text clears the slot */
+    rs_tx_put_slot(tx, id, &s);
 }
 
 void rs_tx_clear_slot(rs_tx_t *tx, uint8_t id)
@@ -136,16 +158,19 @@ static void control_packet(rs_tx_t *tx, uint8_t k, uint8_t *id, uint16_t *seed, 
 void rs_tx_next_packet(rs_tx_t *tx, uint8_t *id, uint16_t *seed, uint8_t *payload)
 {
     if (tx->cur_sent == 0) {
-        /* start of a visit: pick the next slot in the round */
-        if (tx->round_pos >= tx->round_len) build_round(tx);
-        if (tx->round_len == 0) {
-            *id = RS_SLOT_STATUS; *seed = RS_SEED_META; *payload = rs_meta(0, RS_LVL_STATUS);
-            tx->packets_sent++;
-            return;
+        /* start of a visit: the next slot of the round that still holds a message (a slot can
+         * be cleared after the round was built); with none left, an idle packet */
+        tx->cur.valid = 0;
+        while (!tx->cur.valid) {
+            if (tx->round_pos >= tx->round_len) build_round(tx);
+            if (tx->round_len == 0) {
+                *id = RS_SLOT_STATUS; *seed = RS_SEED_META; *payload = rs_meta(0, RS_LVL_STATUS);
+                tx->packets_sent++;
+                return;
+            }
+            tx->cur_id = tx->round[tx->round_pos++];
+            tx->cur = tx->slots[tx->cur_id];      /* snapshot */
         }
-        tx->cur_id = tx->round[tx->round_pos++];
-        tx->cur = tx->slots[tx->cur_id];          /* snapshot */
-        if (!tx->cur.valid) { rs_tx_next_packet(tx, id, seed, payload); return; }
         tx->visit_len = (uint8_t)(tx->cur.len + 6);
     }
     uint8_t pos = tx->cur_sent;
@@ -169,19 +194,23 @@ void rs_tx_next_packet(rs_tx_t *tx, uint8_t *id, uint16_t *seed, uint8_t *payloa
     tx->packets_sent++;
 }
 
-static void fetch_packet(rs_tx_t *tx, int c)
+void rs_tx_prepare(rs_tx_t *tx)
 {
-    if (tx->rep_left[c] > 0) { tx->rep_left[c]--; tx->chip_pos[c] = 0; return; }   /* another copy of the same packet */
-    uint8_t id, payload; uint16_t seed;
-    rs_tx_next_packet(tx, &id, &seed, &payload);
-    rs_encode_packet(id, seed, payload, tx->chips[c]);
-    tx->chip_pos[c] = 0;
-    tx->rep_left[c] = (uint8_t)(tx->repeat > 1 ? tx->repeat - 1 : 0);
+    if (tx->next_ready || tx->preparing) return;
+    tx->preparing = 1;
+    uint8_t next = tx->air ^ 1u;
+    for (int c = 0; c < tx->nchan; c++) {
+        uint8_t id, payload; uint16_t seed;
+        rs_tx_next_packet(tx, &id, &seed, &payload);
+        rs_encode_packet(id, seed, payload, tx->chips[next][c]);
+    }
+    tx->next_ready = 1;                     /* ready before "not preparing": the chip path never sees neither */
+    tx->preparing = 0;
 }
 
 void rs_tx_set_repeat(rs_tx_t *tx, uint8_t n)
 {
-    tx->repeat = n < 1 ? 1 : (n > 100 ? 100 : n);   /* 2-3 for a frame-sized window; 20-60 for stitching across frames */
+    tx->repeat = n < 1 ? 1 : (n > RS_TX_MAX_REPEAT ? RS_TX_MAX_REPEAT : n);
 }
 
 void rs_tx_next_chips(rs_tx_t *tx, uint8_t out[RS_MAX_CHANNELS])
@@ -211,11 +240,21 @@ void rs_tx_next_chips(rs_tx_t *tx, uint8_t out[RS_MAX_CHANNELS])
             tx->in_pause = 1; tx->burst_pos = 0;
             return;
         }
-        for (int c = 0; c < tx->nchan; c++) fetch_packet(tx, c);
+        if (tx->rep_left > 0) {
+            tx->rep_left--;                 /* another copy of the same packets */
+        } else {
+            if (!tx->next_ready) {
+                if (tx->preparing) return;  /* a prepare this interrupt preempted: the gap grows by a (dark) chip */
+                rs_tx_prepare(tx);          /* nobody prepared them: here, in the chip path */
+            }
+            tx->air ^= 1u; tx->next_ready = 0;
+            tx->rep_left = (uint8_t)(tx->repeat > 1 ? tx->repeat - 1 : 0);
+        }
+        for (int c = 0; c < tx->nchan; c++) tx->chip_pos[c] = 0;
     }
     if (tx->burst_on) tx->burst_pos++;
     if (tx->pilot_period) tx->pilot_pos++;
-    for (int c = 0; c < tx->nchan; c++) out[c] = tx->chips[c][tx->chip_pos[c]++];
+    for (int c = 0; c < tx->nchan; c++) out[c] = tx->chips[tx->air][c][tx->chip_pos[c]++];
     if (tx->nchan == 1) { out[1] = out[0]; out[2] = out[0]; }
 }
 
@@ -227,3 +266,4 @@ uint8_t rs_tx_next_chip(rs_tx_t *tx)
 }
 
 int rs_tx_encode(uint8_t id, uint16_t seed, uint8_t payload, uint8_t *chips) { return rs_encode_packet(id, seed, payload, chips); }
+size_t rs_tx_sizeof(void) { return sizeof(rs_tx_t); }

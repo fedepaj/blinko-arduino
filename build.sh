@@ -15,7 +15,9 @@ arduino-cli compile --fqbn "$FQBN" --libraries "$HERE/libraries" --output-dir "$
     --warnings default "$HERE/libraries/Blinko/examples/$SKETCH"
 if [ "$2" = "upload" ]; then
     # several boards connected: flash by USB serial (arduino-cli's dfu-util refuses two DFU devices)
-    N=$(arduino-cli board list 2>/dev/null | grep -c 'Nano R4')
+    # grep -c prints 0 and exits 1 when nothing matches: without the `|| true`, set -e would stop
+    # the script here, before the single-board path below
+    N=$(arduino-cli board list 2>/dev/null | grep -c 'Nano R4' || true)
     if [ "$N" -gt 1 ] && [ -f "$HERE/../tools/flash_r4.py" ]; then
         PY=${PY:-$HERE/../.venv/bin/python}
         [ -n "$PORT" ] || { echo "several Nano R4 connected: set PORT=/dev/cu.usbmodemXXX" >&2; exit 2; }

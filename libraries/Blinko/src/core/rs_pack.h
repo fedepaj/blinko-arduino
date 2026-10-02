@@ -18,6 +18,11 @@ extern "C" {
  * it does not fit or would not be shorter than the input. */
 size_t rs_pack6(const char *text, size_t len, uint8_t *out, size_t out_cap);
 
+/* Pack as many leading characters of text as fit in out_cap bytes. Returns the packed length
+ * and, in *consumed, how many characters it holds: a message slot of 31 bytes carries up to 41
+ * characters this way, and a long text is split where the packing ends, not at 31 characters. */
+size_t rs_pack6_fit(const char *text, size_t len, uint8_t *out, size_t out_cap, size_t *consumed);
+
 /* Unpack into text (capacity text_cap, NUL-terminated). Returns text length. */
 size_t rs_unpack6(const uint8_t *in, size_t len, char *text, size_t text_cap);
 

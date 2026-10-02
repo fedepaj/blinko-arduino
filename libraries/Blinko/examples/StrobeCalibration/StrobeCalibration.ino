@@ -1,7 +1,8 @@
 /*
- * strobe_calib — bare strobe for measuring a camera's rolling shutter
- * (see docs/CALIBRATION.md). Blinks all LEDs with a square wave.
- * Serial: "f <hz>" sets the frequency (default 2000 Hz), "d <percent>" duty.
+ * strobe_calib — bare strobe for measuring a camera's rolling shutter (the procedure is in
+ * docs/CALIBRATION.md of the blinko repository, the umbrella of this one). Blinks all LEDs
+ * with a square wave.
+ * Serial (115200): "f <hz>" sets the frequency (default 2000 Hz).
  */
 #include <Blinko.h>
 

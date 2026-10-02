@@ -1,12 +1,18 @@
 /*
- * Blinko — optical logger for rolling-shutter cameras (Arduino Nano R4 / UNO R4).
+ * Blinko — optical logger for rolling-shutter cameras (Arduino Nano R4, Renesas RA4M1).
  *
  *   #include <Blinko.h>
  *   void setup() { Blinko.begin(); Blinko.info("boot ok"); }
  *
  * Messages are transmitted continuously by blinking the on-board LEDs from a
  * hardware timer interrupt. A phone camera pointed at the board decodes them.
- * See docs/PROTOCOL.md for the wire format.
+ * The wire format is in docs/PROTOCOL.md of the blinko-core repository.
+ *
+ * What the library takes: one GPT timer for the chips (and the LED pins' GPT channels while the
+ * brightness is under 100), the last 1 KB block of the data flash (EEPROM addresses 7168..8191)
+ * when persist_faults is on, and 68 bytes of RAM at 0x20007A00 that survive a reset.
+ * Calls from the sketch may come from loop() and from interrupt handlers; a message costs a
+ * formatted print plus a short masked copy.
  */
 #ifndef BLINKO_H
 #define BLINKO_H
@@ -18,6 +24,11 @@
 #define BLINKO_PINS_PER_CH 2
 #define BLINKO_NO_PIN 0xFF
 #define BLINKO_CHECKPOINT_LEN 16
+/* Shortest T. The chip interrupt (timer period T/3) takes about 12 us on the RA4M1: measured, the
+ * board keeps its tick rate and answers on serial down to T = 39 us and stops answering at 36.
+ * At T = 45 it leaves the sketch about a fifth of the CPU, at the default 60 about 40 %. */
+#define BLINKO_MIN_CHIP_US 45
+#define RS_TEXT_CHARS_MAX 41                        /* characters one message holds at most (31 bytes of 6-bit symbols) */
 
 struct BlinkoConfig {
     uint32_t chip_us = 60;                       /* minimum run T of the line code (RLL(2,7)): keep >= the phone's exposure; the timer runs at T / RS_CELLS_PER_T */
@@ -25,7 +36,7 @@ struct BlinkoConfig {
     uint8_t  ch_pins[RS_MAX_CHANNELS][BLINKO_PINS_PER_CH] = { { LEDR, LED_BUILTIN }, { LEDG, BLINKO_NO_PIN }, { LEDB, BLINKO_NO_PIN } };
     uint8_t  ch_active_low[RS_MAX_CHANNELS][BLINKO_PINS_PER_CH] = { { 1, 0 }, { 1, 0 }, { 1, 0 } };
     uint8_t  channels = 3;                       /* 3 = independent RGB streams (3x throughput), 1 = all LEDs same stream */
-    uint16_t pilot_ms = 30;                      /* RGB colour-calibration pilots interval; 36 chips every 30 ms = 3.6 % overhead, ~4x more pilots per second than 100 ms */
+    uint16_t pilot_ms = 30;                      /* mean interval of the RGB colour-calibration pilot blocks (36 chips each: 2.4 % of the airtime at T = 60 us) */
     uint8_t  repeat = 1;                         /* send every packet n times back to back: phones whose window is shorter than a packet (30 fps Android) read it across two copies */
     uint8_t  brightness = 100;                   /* lit level in percent through a ~240 kHz PWM on the LED pins (100 = plain on/off): a phone a centimetre away saturates on a full-brightness LED and loses the short gaps; 30-50 % keeps the stripes in range */
     uint32_t fault_chip_us = 120;                /* death loop timing: the most conservative values that decoded on every phone tried (a 57 us-exposure Android needs T >= 90 us and 2-3 copies; the iPhone loses little): T = 120 us ... */
@@ -39,7 +50,7 @@ struct BlinkoConfig {
     bool     announce_boot = true;               /* fill STATUS slot with reset cause at begin() */
 };
 
-/* Record that survives resets (placed in .noinit RAM). */
+/* Record that survives resets (at a fixed address in high RAM, see BLINKO_RECORD_ADDR in Blinko.cpp). */
 struct rs_fault_record_t {
     uint32_t magic;                              /* BLINKO_FAULT_MAGIC when a fault record is pending */
     uint32_t boot_magic;                         /* BLINKO_BOOT_MAGIC once begin() ran (detects warm resets) */
@@ -61,17 +72,23 @@ public:
     bool begin(const BlinkoConfig &cfg = BlinkoConfig());
     void end();
 
-    /* Logging (slots 0..5, newest first in the carousel). Text > 31 bytes is split. */
+    /* Logging (slots 0..5, newest first in the carousel). A message holds 31 bytes: up to 41
+     * characters of ordinary log text, 31 of anything else. A longer text is split into several
+     * messages (127 characters per call at most); a seventh message replaces the oldest. */
     void log(uint8_t level, const char *fmt, ...);
     void debug(const char *fmt, ...);
     void info(const char *fmt, ...);
     void warn(const char *fmt, ...);
     void error(const char *fmt, ...);
 
-    /* STATUS slot (6): periodic state, e.g. uptime, mode, counters. */
+    /* STATUS slot (6): periodic state, e.g. uptime, mode, counters. One message: what does not
+     * fit is dropped. Calling it again with the same text changes nothing; a new text restarts
+     * the slot, so a status that changes faster than a phone reads it (about a second) is
+     * never seen. */
     void status(const char *fmt, ...);
 
-    /* FATAL: record the reason (RAM + EEPROM), then transmit forever. Never returns. */
+    /* FATAL: record the reason (RAM + data flash), then blink it on the fault LED until reset.
+     * Never returns. The reason is sent again after every boot until clearFault(). */
     void fatal(uint8_t code, const char *fmt, ...) __attribute__((noreturn));
 
     /* Fault slot (7) management. */
@@ -83,7 +100,7 @@ public:
      * shown by the app next to the light that sends it). */
     uint16_t boardId() const;
 
-    /* Name the current phase; reported if a watchdog/hard fault reset follows. */
+    /* Name the current phase; reported as "WDT reset @name" if a watchdog reset follows. */
     void checkpoint(const char *name);
 
     /* Tuning / diagnostics */
@@ -93,8 +110,10 @@ public:
     void setRepeat(uint8_t n);                         /* 1..100 copies of every packet: 2-3 for 30 fps phones, 20-60 for far lights (stitching) */
     void setBrightness(uint8_t percent);               /* 1..100: lit level by PWM (see BlinkoConfig::brightness); 100 = plain on/off */
     uint8_t brightness() const { return _cfg.brightness; }
-    const char *timerInfo();
-    const char *pfsInfo();                              /* diagnostics: red LED pin function register, lit / dark / current */                            /* diagnostics: chip timer type/channel, running, PWM active */
+    uint8_t repeat() const { return _cfg.repeat; }
+    uint8_t channels() const { return _cfg.channels; }
+    const char *timerInfo();                           /* diagnostics: chip timer type/channel, running, PWM active */
+    const char *pfsInfo();                             /* diagnostics: red LED pin function register, lit / dark / current */
     uint32_t chipMicros() const { return _cfg.chip_us; }
     uint32_t cellMicros() const { return _cfg.chip_us / RS_CELLS_PER_T; }   /* timer period: one code cell */
     void setEnabled(bool on);
@@ -103,7 +122,7 @@ public:
     uint32_t packetsSent() const { return _tx.packets_sent; }
     const char *resetCause() const { return _reset_cause; }
     uint32_t bootCount() const;
-    bool flashSelfTest();                        /* write+read back a scratch record (diagnostics) */
+    bool flashSelfTest();                        /* write and read back a scratch record, then put back what was there (diagnostics; prints to Serial) */
     rs_tx_t &tx() { return _tx; }
 
     /* internal */
@@ -111,6 +130,7 @@ public:
     void _writeChips(const uint8_t chips[RS_MAX_CHANNELS]);
     void _writeAll(uint8_t level);
     void _applyBrightness();
+    void _applyTiming();
     static void _persistAndLoop(const char *text) __attribute__((noreturn));
 
 private:
@@ -127,9 +147,10 @@ private:
     uint8_t _print_len = 0, _print_level = RS_LVL_INFO;
     char _reset_cause[12] = "?";
     bool _running = false;
-    bool _enabled = true;
-    bool _strobe = false;
+    volatile bool _enabled = true;
+    volatile bool _strobe = false;
     uint8_t _strobe_level = 0;
+    uint8_t _next_chips[RS_MAX_CHANNELS] = { 0, 0, 0 };   /* what the next tick writes to the pins */
 };
 
 extern BlinkoClass Blinko;

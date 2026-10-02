@@ -62,6 +62,26 @@ static uint32_t fw_build_id()
 
 static void timer_cb(timer_callback_args_t *) { Blinko._tick(); }
 
+/* The next packets are chosen and encoded here, in the lowest-priority exception, which the chip
+ * interrupt preempts: three packets take about 120 us on this MCU, six chip periods at T = 60 us,
+ * and done inside the chip interrupt they cost 8 % of its ticks (every packet 89 chips long
+ * instead of 82, measured with the tick counter). The chip interrupt asks for it with a pended
+ * PendSV as soon as the previous packets went on air. */
+extern "C" void PendSV_Handler(void) { rs_tx_prepare(&Blinko.tx()); }
+
+/* Masks the interrupts for a scope and puts back what was there before: a Blinko call made
+ * inside the sketch's own noInterrupts() block must not switch them back on (interrupts() does). */
+struct IrqLock {
+    uint32_t primask;
+    IrqLock() : primask(__get_PRIMASK()) { __disable_irq(); }
+    ~IrqLock() { __set_PRIMASK(primask); }
+};
+
+/* Write the fault text to data flash unless it is there already. The death loop writes the
+ * record and the next boot, finding it in RAM too, used to write it again: two erase cycles per
+ * fault, which a crash loop behind a watchdog repeats every few seconds. */
+static void persist_fault(const char *text, uint32_t boot_count);
+
 /* ---------------------------------------------------------------- pins */
 
 /* Dimmed output. The LED pin runs a hardware PWM at the brightness duty and the chip only
@@ -77,6 +97,16 @@ static inline void pfs_write(volatile uint32_t *reg, uint32_t v)
     R_BSP_PinAccessDisable();
 }
 
+/* One store to the port's set/reset register (PCNTR3: bits 0-15 set, 16-31 reset). digitalWrite()
+ * and R_BSP_PinWrite() go through the pin function register and its write protection; four
+ * digitalWrite() per chip took most of a 15 us chip period. */
+static inline void pin_write(uint8_t pin, bool high)
+{
+    bsp_io_port_pin_t pp = g_pin_cfg[pin].pin;
+    R_PORT0_Type *port = (R_PORT0_Type *)((uintptr_t)R_PORT0 + (pp >> 8) * ((uintptr_t)R_PORT1 - (uintptr_t)R_PORT0));
+    port->PCNTR3 = high ? (1u << (pp & 0xFF)) : (1u << (pp & 0xFF)) << 16;
+}
+
 /* Diagnostics: the pin function register of the red LED as configured for lit / dark and now. */
 const char *BlinkoClass::pfsInfo()
 {
@@ -86,16 +116,57 @@ const char *BlinkoClass::pfsInfo()
     return buf;
 }
 
+/* What the chip interrupt writes for each LED pin, worked out once in begin(): the port's
+ * set/reset register and the word that lights the LED and the one that darkens it. */
+static R_PORT0_Type *s_led_port[RS_MAX_CHANNELS][BLINKO_PINS_PER_CH];
+static uint32_t s_led_on[RS_MAX_CHANNELS][BLINKO_PINS_PER_CH], s_led_off[RS_MAX_CHANNELS][BLINKO_PINS_PER_CH];
+static void cache_led_pins(const BlinkoConfig &cfg)
+{
+    for (uint8_t c = 0; c < RS_MAX_CHANNELS; c++) for (uint8_t k = 0; k < BLINKO_PINS_PER_CH; k++) {
+        uint8_t pin = cfg.ch_pins[c][k];
+        if (pin == BLINKO_NO_PIN) { s_led_port[c][k] = nullptr; continue; }
+        bsp_io_port_pin_t pp = g_pin_cfg[pin].pin;
+        uint32_t set = 1u << (pp & 0xFF), reset = set << 16;
+        s_led_port[c][k] = (R_PORT0_Type *)((uintptr_t)R_PORT0 + (pp >> 8) * ((uintptr_t)R_PORT1 - (uintptr_t)R_PORT0));
+        s_led_on[c][k] = cfg.ch_active_low[c][k] ? reset : set;
+        s_led_off[c][k] = cfg.ch_active_low[c][k] ? set : reset;
+    }
+}
+
 void BlinkoClass::_writeChips(const uint8_t chips[RS_MAX_CHANNELS])
 {
     for (uint8_t c = 0; c < RS_MAX_CHANNELS; c++) {
         for (uint8_t k = 0; k < BLINKO_PINS_PER_CH; k++) {
-            uint8_t pin = _cfg.ch_pins[c][k];
-            if (pin == BLINKO_NO_PIN) continue;
+            if (!s_led_port[c][k]) continue;
             if (s_pfs_reg[c][k]) pfs_write(s_pfs_reg[c][k], chips[c] ? s_pfs_on[c][k] : s_pfs_off[c][k]);
-            else digitalWrite(pin, (chips[c] ^ _cfg.ch_active_low[c][k]) ? HIGH : LOW);
+            else s_led_port[c][k]->PCNTR3 = chips[c] ? s_led_on[c][k] : s_led_off[c][k];
         }
     }
+}
+
+/* The second output (A or B) of a GPT channel that one of our PwmOut objects already runs.
+ * Two LED pins can sit on the two outputs of one timer (the Nano R4's green and blue: GPT6 B and
+ * A), and a second PwmOut on a channel in use goes through a path of the core that only works
+ * for analogWrite() pins: it left GPT6 misconfigured and green and blue dark at any brightness
+ * under 100. So the second pin gets no PwmOut: its output is enabled on the first pin's timer,
+ * with the same waveform, and its duty set there. */
+static bool pwm_second_output(PwmOut *owner, uint8_t pin, uint8_t gpt_channel, bool on_a, float duty_perc)
+{
+    R_GPT0_Type *gpt = (R_GPT0_Type *)((uintptr_t)R_GPT0 + gpt_channel * ((uintptr_t)R_GPT1 - (uintptr_t)R_GPT0));
+    R_IOPORT_PinCfg(&g_ioport_ctrl, g_pin_cfg[pin].pin, (uint32_t)(IOPORT_CFG_PERIPHERAL_PIN | IOPORT_PERIPHERAL_GPT1));
+    uint32_t gtior = gpt->GTIOR;
+    if (on_a) {      /* the waveform bits of the output already running, copied to the other one, and its enable */
+        uint32_t fn = (gtior & R_GPT0_GTIOR_GTIOB_Msk) >> R_GPT0_GTIOR_GTIOB_Pos;
+        gtior = (gtior & ~R_GPT0_GTIOR_GTIOA_Msk) | (fn << R_GPT0_GTIOR_GTIOA_Pos) | R_GPT0_GTIOR_OAE_Msk;
+    } else {
+        uint32_t fn = (gtior & R_GPT0_GTIOR_GTIOA_Msk) >> R_GPT0_GTIOR_GTIOA_Pos;
+        gtior = (gtior & ~R_GPT0_GTIOR_GTIOB_Msk) | (fn << R_GPT0_GTIOR_GTIOB_Pos) | R_GPT0_GTIOR_OBE_Msk;
+    }
+    gpt->GTWP = 0xA500u;                                  /* the timer's registers are write-protected */
+    gpt->GTIOR = gtior;
+    gpt->GTWP = 0xA501u;
+    uint32_t counts = (uint32_t)((float)owner->get_timer()->get_period_raw() * duty_perc / 100.0f);
+    return owner->get_timer()->set_duty_cycle(counts, on_a ? CHANNEL_A : CHANNEL_B);
 }
 
 /* Brightness below 100 % puts every LED pin on a hardware PWM (the Nano R4's LED pins sit on
@@ -103,6 +174,12 @@ void BlinkoClass::_writeChips(const uint8_t chips[RS_MAX_CHANNELS])
  * the pin between that output and a GPIO at the off level (see _writeChips). */
 void BlinkoClass::_applyBrightness()
 {
+    PwmOut *owner_of[8] = { nullptr };                    /* the PwmOut running each GPT channel */
+    if (_cfg.brightness < 100)
+        for (uint8_t c = 0; c < RS_MAX_CHANNELS; c++) for (uint8_t k = 0; k < BLINKO_PINS_PER_CH; k++) if (s_pwm[c][k]) {
+            auto cfgs = getPinCfgs(_cfg.ch_pins[c][k], PIN_CFG_REQ_PWM);
+            if (cfgs[0] && GET_CHANNEL(cfgs[0]) < 8) owner_of[GET_CHANNEL(cfgs[0])] = s_pwm[c][k];
+        }
     for (uint8_t c = 0; c < RS_MAX_CHANNELS; c++) {
         for (uint8_t k = 0; k < BLINKO_PINS_PER_CH; k++) {
             uint8_t pin = _cfg.ch_pins[c][k];
@@ -114,11 +191,17 @@ void BlinkoClass::_applyBrightness()
                 pinMode(pin, OUTPUT); digitalWrite(pin, _cfg.ch_active_low[c][k] ? HIGH : LOW);
                 continue;
             }
-            if (!s_pwm[c][k]) {
+            auto cfgs = getPinCfgs(pin, PIN_CFG_REQ_PWM);
+            if (!cfgs[0] || IS_PIN_AGT_PWM(cfgs[0]) || GET_CHANNEL(cfgs[0]) >= 8) { s_pfs_reg[c][k] = nullptr; continue; }   /* no GPT output on this pin: it stays at full brightness */
+            uint8_t gch = GET_CHANNEL(cfgs[0]);
+            if (s_pwm[c][k]) {
+                s_pwm[c][k]->pulse_perc(duty);
+            } else if (owner_of[gch]) {
+                if (!pwm_second_output(owner_of[gch], pin, gch, IS_PWM_ON_A(cfgs[0]), duty)) { pinMode(pin, OUTPUT); s_pfs_reg[c][k] = nullptr; continue; }
+            } else {
                 s_pwm[c][k] = new PwmOut(pin);
                 if (!s_pwm[c][k]->begin(BLINKO_PWM_HZ, duty)) { delete s_pwm[c][k]; s_pwm[c][k] = nullptr; s_pfs_reg[c][k] = nullptr; continue; }
-            } else {
-                s_pwm[c][k]->pulse_perc(duty);
+                owner_of[gch] = s_pwm[c][k];
             }
             bsp_io_port_pin_t pp = g_pin_cfg[pin].pin;
             volatile uint32_t *reg = &R_PFS->PORT[pp >> 8].PIN[pp & 0xFF].PmnPFS;
@@ -147,7 +230,8 @@ void BlinkoClass::setBrightness(uint8_t percent)
     bool was_running = _running;
     if (was_running) { s_timer.stop(); s_timer.end(); _running = false; }
     _applyBrightness();
-    if (was_running) _running = _startTimer(1.0e6f / (float)cellMicros());   /* (a strobe in progress resumes as data) */
+    _strobe = false;                                    /* the timer restarts at the chip rate: a strobe in progress ends */
+    if (was_running) _running = _startTimer(1.0e6f / (float)cellMicros());
 }
 
 void BlinkoClass::_writeAll(uint8_t level)
@@ -161,9 +245,14 @@ void BlinkoClass::_tick()
     s_ticks++;
     if (!_enabled) return;
     if (_strobe) { _strobe_level ^= 1; _writeAll(_strobe_level); return; }
-    uint8_t chips[RS_MAX_CHANNELS];
-    rs_tx_next_chips(&_tx, chips);
-    _writeChips(chips);
+    /* The pins first, with the chips worked out in the previous tick, then the next ones: the
+     * time from the timer's overflow to the pin write is then constant. Working them out first
+     * put the encoder's time before the write, and at a packet boundary (three packets to encode)
+     * that is several chip periods: the last chip of every packet was stretched and the gap
+     * before the sync eaten. The death loop below does the same. */
+    _writeChips(_next_chips);
+    rs_tx_next_chips(&_tx, _next_chips);
+    if (rs_tx_wants_prepare(&_tx)) SCB->ICSR = SCB_ICSR_PENDSVSET_Msk;
 }
 
 /* --------------------------------------------------------------- timer */
@@ -196,7 +285,18 @@ bool BlinkoClass::_startTimer(float hz)
 
 bool BlinkoClass::begin(const BlinkoConfig &cfg)
 {
+    if (_running) end();
     _cfg = cfg;
+    /* a configuration that would divide by zero or leave the LEDs dark is brought into range */
+    if (_cfg.chip_us < BLINKO_MIN_CHIP_US) _cfg.chip_us = BLINKO_MIN_CHIP_US;
+    if (_cfg.fault_chip_us == 0) _cfg.fault_chip_us = 120;
+    if (_cfg.fault_chip_us < BLINKO_MIN_CHIP_US) _cfg.fault_chip_us = BLINKO_MIN_CHIP_US;
+    if (_cfg.fault_repeat == 0) _cfg.fault_repeat = 3;
+    if (_cfg.brightness < 1 || _cfg.brightness > 100) _cfg.brightness = 100;
+    _cfg.channels = (_cfg.channels == 3) ? 3 : 1;
+    _strobe = false; _enabled = true;
+    _next_chips[0] = _next_chips[1] = _next_chips[2] = 0;
+    cache_led_pins(_cfg);
     rs_tx_init(&_tx);
     for (uint8_t c = 0; c < RS_MAX_CHANNELS; c++)
         for (uint8_t k = 0; k < BLINKO_PINS_PER_CH; k++)
@@ -219,20 +319,12 @@ bool BlinkoClass::begin(const BlinkoConfig &cfg)
         fr.text[RS_MSG_MAX_LEN] = 0;
         strncpy(_fault_text, fr.text, RS_MSG_MAX_LEN); _fault_text[RS_MSG_MAX_LEN] = 0;
         fr.magic = 0;
-        if (_cfg.persist_faults) {
-            rs_ee_record_t ee = { BLINKO_EE_MAGIC, fr.boot_count, { 0 } };
-            strncpy(ee.text, _fault_text, RS_MSG_MAX_LEN);
-            df_write(ee);
-        }
-    } else if (warm && (strstr(_reset_cause, "WDT") || strstr(_reset_cause, "IWDT"))) {
+        if (_cfg.persist_faults) persist_fault(_fault_text, fr.boot_count);
+    } else if (warm && strstr(_reset_cause, "WDT")) {     /* WDT or IWDT */
         /* watchdog reset with no explicit record: report last checkpoint */
         fr.checkpoint[BLINKO_CHECKPOINT_LEN - 1] = 0;
         snprintf(_fault_text, sizeof(_fault_text), "WDT reset @%s", fr.checkpoint[0] ? fr.checkpoint : "?");
-        if (_cfg.persist_faults) {
-            rs_ee_record_t ee = { BLINKO_EE_MAGIC, fr.boot_count, { 0 } };
-            strncpy(ee.text, _fault_text, RS_MSG_MAX_LEN);
-            df_write(ee);
-        }
+        if (_cfg.persist_faults) persist_fault(_fault_text, fr.boot_count);
     } else if (_cfg.persist_faults) {
         if (warm && fr.loading == BLINKO_LOAD_MAGIC) {
             /* the previous boot crashed while reading the record: don't retry, wipe it */
@@ -251,11 +343,10 @@ bool BlinkoClass::begin(const BlinkoConfig &cfg)
 
     if (_cfg.announce_boot) status("boot#%lu rst=%s id=%04x", (unsigned long)fr.boot_count, _reset_cause, boardId());
 
-    uint32_t cell_us = cellMicros();
-    rs_tx_set_burst(&_tx, (uint32_t)_cfg.burst_on_ms * 1000u / cell_us, (uint32_t)_cfg.burst_off_ms * 1000u / cell_us);
-    rs_tx_set_channels(&_tx, _cfg.channels, (uint32_t)_cfg.pilot_ms * 1000u / cell_us);
+    _applyTiming();
     rs_tx_set_repeat(&_tx, _cfg.repeat);
-    _running = _startTimer(1.0e6f / (float)cell_us);
+    NVIC_SetPriority(PendSV_IRQn, (1u << __NVIC_PRIO_BITS) - 1u);   /* below every interrupt, the chip timer's first of all */
+    _running = _startTimer(1.0e6f / (float)cellMicros());
     return _running;
 }
 
@@ -265,10 +356,20 @@ void BlinkoClass::end()
     _writeAll(0);
 }
 
+static void persist_fault(const char *text, uint32_t boot_count)
+{
+    rs_ee_record_t ee;
+    df_read(ee);
+    if (ee.magic == BLINKO_EE_MAGIC && strncmp(ee.text, text, RS_MSG_MAX_LEN) == 0) return;
+    rs_ee_record_t w = { BLINKO_EE_MAGIC, boot_count, { 0 } };
+    strncpy(w.text, text, RS_MSG_MAX_LEN);
+    df_write(w);
+}
+
 void BlinkoClass::_loadPersistedFault()
 {
     rs_ee_record_t ee;
-    if (!df_read(ee)) return;
+    df_read(ee);
     if (ee.magic == BLINKO_EE_MAGIC) {
         ee.text[RS_MSG_MAX_LEN] = 0;
         strncpy(_fault_text, ee.text, RS_MSG_MAX_LEN); _fault_text[RS_MSG_MAX_LEN] = 0;
@@ -278,7 +379,7 @@ void BlinkoClass::_loadPersistedFault()
 void BlinkoClass::clearFault()
 {
     _fault_text[0] = 0;
-    noInterrupts(); rs_tx_clear_slot(&_tx, RS_SLOT_FAULT); interrupts();
+    { IrqLock lock; rs_tx_clear_slot(&_tx, RS_SLOT_FAULT); }
     if (_cfg.persist_faults) {
         rs_ee_record_t ee = { 0, 0, { 0 } };
         df_write(ee);
@@ -298,7 +399,7 @@ bool BlinkoClass::flashSelfTest()
     rs_ee_record_t back; bool r2 = df_read(back);
     Serial.print("  write: "); Serial.print(r1 ? "ok" : "fail"); Serial.print(" readback: "); Serial.print(r2 ? "ok" : "fail");
     Serial.print(" magic=0x"); Serial.print(back.magic, HEX); Serial.print(" text="); back.text[RS_MSG_MAX_LEN] = 0; Serial.println(back.text);
-    rs_ee_record_t z = { 0, 0, { 0 } }; df_write(z);
+    df_write(ee);                                       /* what was there before the test, fault record included */
     return r1 && r2 && back.magic == 0x54455354u;
 }
 
@@ -329,11 +430,18 @@ void BlinkoClass::_readResetCause()
 
 /* ------------------------------------------------------------- logging */
 
+/* A message is packed with the chip interrupt running (rs_tx_slot_prepare) and only copied into
+ * the transmitter with it masked: the packing takes several chip periods. */
 void BlinkoClass::_setSlot(uint8_t id, uint8_t level, const char *text, size_t len)
 {
-    noInterrupts();
-    rs_tx_set_slot(&_tx, id, level, text, len);
-    interrupts();
+    rs_slot_t slot;
+    rs_tx_slot_prepare(&slot, level, text, len);
+    /* The text that is on air already is left alone: a status() called on every loop() would
+     * otherwise restart the slot from its first packet each time and never get through. */
+    const rs_slot_t &cur = _tx.slots[id];
+    if (slot.valid && cur.valid && cur.len == slot.len && cur.level == slot.level && cur.packed == slot.packed && memcmp(cur.data, slot.data, slot.len) == 0) return;
+    IrqLock lock;
+    rs_tx_put_slot(&_tx, id, &slot);
 }
 
 void BlinkoClass::_vlog(uint8_t level, const char *fmt, va_list ap)
@@ -342,13 +450,14 @@ void BlinkoClass::_vlog(uint8_t level, const char *fmt, va_list ap)
     int n = vsnprintf(buf, sizeof(buf), fmt, ap);
     if (n < 0) return;
     if (n > (int)sizeof(buf) - 1) n = sizeof(buf) - 1;
-    /* split long text into 31-byte messages, oldest chunk first */
-    for (int off = 0; off < n || (off == 0 && n == 0); off += RS_MSG_MAX_LEN) {
-        int len = n - off; if (len > RS_MSG_MAX_LEN) len = RS_MSG_MAX_LEN;
-        if (len <= 0) break;
-        noInterrupts();
-        rs_tx_log(&_tx, level, buf + off, (size_t)len);
-        interrupts();
+    /* a long text becomes several messages, oldest piece first; each takes as much text as its
+     * 31 bytes hold (up to 41 characters when the 6-bit packing applies) */
+    for (int off = 0; off < n; ) {
+        rs_slot_t slot;
+        size_t took = rs_tx_slot_prepare(&slot, level, buf + off, (size_t)(n - off));
+        if (took == 0) break;
+        { IrqLock lock; rs_tx_log_slot(&_tx, &slot); }
+        off += (int)took;
     }
 }
 
@@ -377,12 +486,12 @@ void BlinkoClass::printf(const char *fmt, ...)
 
 void BlinkoClass::status(const char *fmt, ...)
 {
-    char buf[RS_MSG_MAX_LEN + 1];
+    char buf[RS_TEXT_CHARS_MAX + 1];                    /* one message: what does not fit is dropped */
     va_list ap; va_start(ap, fmt);
     int n = vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     if (n < 0) return;
-    if (n > RS_MSG_MAX_LEN) n = RS_MSG_MAX_LEN;
+    if (n > (int)sizeof(buf) - 1) n = sizeof(buf) - 1;
     _setSlot(RS_SLOT_STATUS, RS_LVL_STATUS, buf, (size_t)n);
 }
 
@@ -411,11 +520,7 @@ void BlinkoClass::_persistAndLoop(const char *text)
 
     /* Persist right now: the data-flash driver is blocking (no BGO, no IRQ),
      * so this works even from the hard fault handler. */
-    if (Blinko._cfg.persist_faults) {
-        rs_ee_record_t ee = { BLINKO_EE_MAGIC, fr.boot_count, { 0 } };
-        strncpy(ee.text, fr.text, RS_MSG_MAX_LEN);
-        df_write(ee);
-    }
+    if (Blinko._cfg.persist_faults) persist_fault(fr.text, fr.boot_count);
 
     /* Fresh transmitter: FAULT + STATUS + a copy of the recent log slots. */
     static rs_tx_t ftx;
@@ -429,26 +534,29 @@ void BlinkoClass::_persistAndLoop(const char *text)
      * a human sees a blinking red LED and a phone reads the reason inside the blink. Its
      * timing is the conservative fault_chip_us / fault_repeat (defaults T = 120 us, 3 copies),
      * not the running configuration: whoever picks the phone up must be able to read it. */
-    uint32_t chip_us = (Blinko._cfg.fault_chip_us ? Blinko._cfg.fault_chip_us : 120) / RS_CELLS_PER_T;   /* cell period */
+    uint32_t fault_t_us = Blinko._cfg.fault_chip_us >= BLINKO_MIN_CHIP_US ? Blinko._cfg.fault_chip_us : 120;   /* begin() may not have run */
+    uint32_t cell_us = fault_t_us / RS_CELLS_PER_T;
     rs_tx_set_channels(&ftx, 1, 0);
     rs_tx_set_fault_weight(&ftx, Blinko._cfg.fault_weight);
     rs_tx_set_repeat(&ftx, Blinko._cfg.fault_repeat ? Blinko._cfg.fault_repeat : 3);
-    rs_tx_set_burst(&ftx, 150000u / chip_us, 50000u / chip_us);
-    for (uint8_t c = 0; c < RS_MAX_CHANNELS; c++) for (uint8_t k = 0; k < BLINKO_PINS_PER_CH; k++)
-        { s_pfs_reg[c][k] = nullptr; if (s_pwm[c][k]) { s_pwm[c][k]->end(); s_pwm[c][k] = nullptr; } }   /* plain GPIO from here: no timers, no interrupts */
+    rs_tx_set_burst(&ftx, 150000u / cell_us, 50000u / cell_us);
+    /* Plain GPIO from here: no timers, no interrupts. The PWM objects are left as they are (the
+     * pinMode below takes the pins away from their timers): closing them frees memory, and this
+     * may be running in a hard fault raised by a corrupted heap. */
+    for (uint8_t c = 0; c < RS_MAX_CHANNELS; c++) for (uint8_t k = 0; k < BLINKO_PINS_PER_CH; k++) s_pfs_reg[c][k] = nullptr;
     for (uint8_t c = 0; c < RS_MAX_CHANNELS; c++) for (uint8_t k = 0; k < BLINKO_PINS_PER_CH; k++)
         if (Blinko._cfg.ch_pins[c][k] != BLINKO_NO_PIN) pinMode(Blinko._cfg.ch_pins[c][k], OUTPUT);
     Blinko._writeAll(0);
     pinMode(Blinko._cfg.fault_pin, OUTPUT);
 
     /* Exact chip timing from the DWT cycle counter. The work per chip (encoder +
-     * GPIO write) must not add to the period: a chip that grows from 30 to 80 us
-     * makes a packet taller than the LED blob in the camera frame and nothing
-     * decodes. Falls back to the calibrated delay if the counter does not run. */
+     * GPIO write) must not add to the period: a chip that grows to more than twice
+     * its length makes a packet taller than the LED blob in the camera frame and
+     * nothing decodes. Falls back to the calibrated delay if the counter does not run. */
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CYCCNT = 0;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-    uint32_t cyc = (SystemCoreClock / 1000000u) * chip_us;
+    uint32_t cyc = (SystemCoreClock / 1000000u) * cell_us;
     uint32_t probe = DWT->CYCCNT;
     R_BSP_SoftwareDelay(5, BSP_DELAY_UNITS_MICROSECONDS);
     bool have_dwt = (DWT->CYCCNT != probe) && cyc > 0;
@@ -459,10 +567,14 @@ void BlinkoClass::_persistAndLoop(const char *text)
             while ((int32_t)(DWT->CYCCNT - next) < 0) { }
             next += cyc;
         } else {
-            R_BSP_SoftwareDelay(chip_us, BSP_DELAY_UNITS_MICROSECONDS);
+            R_BSP_SoftwareDelay(cell_us, BSP_DELAY_UNITS_MICROSECONDS);
         }
-        digitalWrite(Blinko._cfg.fault_pin, (chip ^ Blinko._cfg.fault_pin_active_low) ? HIGH : LOW);
-        chip = rs_tx_next_chip(&ftx);           /* prepared while the chip is being shown */
+        pin_write(Blinko._cfg.fault_pin, chip ^ Blinko._cfg.fault_pin_active_low);
+        /* the packet after this one is encoded right after a packet starts, during the three
+         * dark chips of its gap (the chip it makes late is a dark one after a dark one), then
+         * the next chip while this one is being shown */
+        if (rs_tx_wants_prepare(&ftx)) rs_tx_prepare(&ftx);
+        chip = rs_tx_next_chip(&ftx);
     }
 }
 
@@ -478,22 +590,30 @@ uint16_t BlinkoClass::boardId() const
 
 void BlinkoClass::setChipMicros(uint32_t us)
 {
-    if (us < 24) us = 24;                          /* T >= 24 us: the timer cell (T/3) stays >= 8 us */
+    if (us < BLINKO_MIN_CHIP_US) us = BLINKO_MIN_CHIP_US;
     _cfg.chip_us = us;
     if (_running) {
-        uint32_t cell_us = cellMicros();
-        rs_tx_set_burst(&_tx, (uint32_t)_cfg.burst_on_ms * 1000u / cell_us, (uint32_t)_cfg.burst_off_ms * 1000u / cell_us);
-        rs_tx_set_channels(&_tx, _cfg.channels, (uint32_t)_cfg.pilot_ms * 1000u / cell_us);
-        s_timer.set_frequency(1.0e6f / (float)cell_us);
+        _applyTiming();
+        if (!_strobe) s_timer.set_frequency(1.0e6f / (float)cellMicros());
     }
+}
+
+/* Bursts and pilot interval are kept in milliseconds and handed to the transmitter in chips of
+ * T / 3 (cellMicros): every change of T, of the bursts or of the channels goes through here.
+ * (setBurst and setChannels once divided by T instead: bursts and pilot interval a third of
+ * what was asked until the next setChipMicros.) */
+void BlinkoClass::_applyTiming()
+{
+    uint32_t cell_us = cellMicros();
+    IrqLock lock;
+    rs_tx_set_burst(&_tx, (uint32_t)_cfg.burst_on_ms * 1000u / cell_us, (uint32_t)_cfg.burst_off_ms * 1000u / cell_us);
+    rs_tx_set_channels(&_tx, _cfg.channels, (uint32_t)_cfg.pilot_ms * 1000u / cell_us);
 }
 
 void BlinkoClass::setBurst(uint16_t on_ms, uint16_t off_ms)
 {
     _cfg.burst_on_ms = on_ms; _cfg.burst_off_ms = off_ms;
-    noInterrupts();
-    rs_tx_set_burst(&_tx, (uint32_t)on_ms * 1000u / _cfg.chip_us, (uint32_t)off_ms * 1000u / _cfg.chip_us);
-    interrupts();
+    _applyTiming();
 }
 
 void BlinkoClass::setEnabled(bool on) { _enabled = on; if (!on) _writeAll(0); }
@@ -514,13 +634,12 @@ void BlinkoClass::ledTest(bool on)
 void BlinkoClass::setChannels(uint8_t n)
 {
     _cfg.channels = (n == 3) ? 3 : 1;
-    noInterrupts();
-    rs_tx_set_channels(&_tx, _cfg.channels, (uint32_t)_cfg.pilot_ms * 1000u / _cfg.chip_us);
-    interrupts();
+    _applyTiming();
 }
 
 void BlinkoClass::setRepeat(uint8_t n)
 {
-    _cfg.repeat = n < 1 ? 1 : (n > 100 ? 100 : n);
-    noInterrupts(); rs_tx_set_repeat(&_tx, _cfg.repeat); interrupts();
+    _cfg.repeat = n < 1 ? 1 : (n > RS_TX_MAX_REPEAT ? RS_TX_MAX_REPEAT : n);
+    IrqLock lock;
+    rs_tx_set_repeat(&_tx, _cfg.repeat);
 }
