@@ -87,7 +87,7 @@ public:
     void setChipMicros(uint32_t us);
     void setBurst(uint16_t on_ms, uint16_t off_ms);   /* visible blink; off_ms = 0 -> continuous */
     void setChannels(uint8_t n);                       /* 3 = RGB streams, 1 = all LEDs same stream */
-    void setRepeat(uint8_t n);                         /* 1..4 copies of every packet */
+    void setRepeat(uint8_t n);                         /* 1..100 copies of every packet: 2-3 for 30 fps phones, 20-60 for far lights (stitching) */
     uint32_t chipMicros() const { return _cfg.chip_us; }
     uint32_t cellMicros() const { return _cfg.chip_us / RS_CELLS_PER_T; }   /* timer period: one code cell */
     void setEnabled(bool on);

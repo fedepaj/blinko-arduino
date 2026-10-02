@@ -421,6 +421,6 @@ void BlinkoClass::setChannels(uint8_t n)
 
 void BlinkoClass::setRepeat(uint8_t n)
 {
-    _cfg.repeat = n < 1 ? 1 : (n > 4 ? 4 : n);
+    _cfg.repeat = n < 1 ? 1 : (n > 100 ? 100 : n);
     noInterrupts(); rs_tx_set_repeat(&_tx, _cfg.repeat); interrupts();
 }
