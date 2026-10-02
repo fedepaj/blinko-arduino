@@ -46,7 +46,9 @@ typedef struct {
 
     /* channels: 1 (all LEDs same stream) or 3 (RGB, independent streams) */
     uint8_t   nchan;
-    uint32_t  pilot_period;       /* chips between pilot blocks (RGB mode), 0 = none */
+    uint32_t  pilot_period;       /* mean chips between pilot blocks (RGB mode), 0 = none */
+    uint32_t  pilot_next;         /* chips until the next block: the period jittered (see rs_tx.c) */
+    uint32_t  pilot_count;        /* blocks sent, drives the jitter sequence */
     uint32_t  pilot_pos;
     uint8_t   in_pilot;
     uint32_t  pilot_idx;

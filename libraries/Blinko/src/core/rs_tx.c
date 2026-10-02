@@ -20,11 +20,27 @@ void rs_tx_set_fault_weight(rs_tx_t *tx, uint8_t w)
     tx->fault_weight = w;
 }
 
+/* The interval before pilot block k: the period scaled by 0.5..1.5 along a golden-ratio
+ * sequence (158/256 ~ 0.618), so consecutive intervals never repeat a phase. A block only
+ * starts at a packet boundary, so with a fixed period the real cadence is a whole number of
+ * packets (11 x 82 + 36 = 938 chips at the 30 ms default and T = 105 us: 32.8 ms), and that
+ * sat within 2 % of a 30 fps phone's frame period: the block drifted a few rows per frame and
+ * spent tens of consecutive frames outside the LED blob, so the phone saw no pilot for
+ * seconds at a time (and a 60 fps phone at T = 60 us had the same problem at twice the rate).
+ * Jittering the interval spreads the block's phase over the frame within a few blocks,
+ * whatever the frame rate or chip time. The mean stays the configured period. */
+static uint32_t pilot_interval(uint32_t period, uint32_t k)
+{
+    uint32_t j = (k * 158u) & 255u;                       /* 0..255, quasi-uniform over k */
+    return period / 2 + (uint32_t)(((uint64_t)period * j) >> 8);
+}
+
 void rs_tx_set_channels(rs_tx_t *tx, uint8_t nchan, uint32_t pilot_period)
 {
     tx->nchan = (nchan == 3) ? 3 : 1;
     tx->pilot_period = (tx->nchan == 3) ? pilot_period : 0;
     tx->pilot_pos = 0; tx->in_pilot = 0;
+    tx->pilot_next = pilot_interval(tx->pilot_period, tx->pilot_count);
 }
 
 static void slot_fill(rs_slot_t *s, uint8_t level, const char *text, size_t len, uint32_t seq)
@@ -174,7 +190,10 @@ void rs_tx_next_chips(rs_tx_t *tx, uint8_t out[RS_MAX_CHANNELS])
     if (tx->in_pilot) {
         uint32_t k = tx->pilot_idx++ / RS_PILOT_P;      /* 0..8 */
         if (k == 2) out[0] = 1; else if (k == 4) out[1] = 1; else if (k == 6) out[2] = 1;
-        if (tx->pilot_idx >= RS_PILOT_CHIPS) { tx->in_pilot = 0; tx->pilot_pos = 0; }
+        if (tx->pilot_idx >= RS_PILOT_CHIPS) {
+            tx->in_pilot = 0; tx->pilot_pos = 0;
+            tx->pilot_next = pilot_interval(tx->pilot_period, ++tx->pilot_count);
+        }
         return;
     }
     if (tx->in_pause) {
@@ -183,7 +202,7 @@ void rs_tx_next_chips(rs_tx_t *tx, uint8_t out[RS_MAX_CHANNELS])
     }
     /* all channels advance in lockstep, so a boundary on channel 0 is a boundary on all */
     if (tx->chip_pos[0] >= RS_PKT_CHIPS) {
-        if (tx->pilot_period && tx->pilot_pos >= tx->pilot_period) {
+        if (tx->pilot_period && tx->pilot_pos >= tx->pilot_next) {
             tx->in_pilot = 1; tx->pilot_idx = 0;
             rs_tx_next_chips(tx, out);
             return;
